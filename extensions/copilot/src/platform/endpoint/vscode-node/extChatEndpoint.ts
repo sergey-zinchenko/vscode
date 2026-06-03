@@ -168,6 +168,7 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 		location,
 		source,
 		telemetryProperties,
+		modelCapabilities,
 	}: IMakeChatRequestOptions, token: CancellationToken): Promise<ChatResponse> {
 		const vscodeMessages = convertToApiChatMessage(messages);
 		const ourRequestId = generateUuid();
@@ -190,7 +191,15 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 			modelOptions: {
 				_capturingTokenCorrelationId: ourRequestId,
 				_otelTraceContext: activeTraceCtx ?? null,
-				...(telemetryTurn !== undefined ? { _telemetryTurn: telemetryTurn } : {}),
+			...(telemetryTurn !== undefined ? { _telemetryTurn: telemetryTurn } : {}),
+			// Forward reasoning/thinking settings so the extension provider can use them.
+			// The provider receives these via ProvideLanguageModelChatResponseOptions.modelOptions.
+			...(modelCapabilities?.enableThinking !== undefined
+				? { enableThinking: modelCapabilities.enableThinking }
+				: {}),
+			...(modelCapabilities?.reasoningEffort
+				? { reasoningEffort: modelCapabilities.reasoningEffort }
+				: {}),
 			}
 		};
 
