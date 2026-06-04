@@ -288,9 +288,34 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 				};
 			}
 		} catch (e) {
+			const reason = toErrorMessage(e, true);
+			const errorType = classifyExtensionContributedError(e, reason);
+
+			if (errorType === ChatFetchResponseType.RateLimited) {
+				return {
+					type: ChatFetchResponseType.RateLimited,
+					reason,
+					requestId: generateUuid(),
+					serverRequestId: undefined,
+					retryAfter: undefined,
+					rateLimitKey: '',
+					isAuto: false
+				};
+			}
+
+			if (errorType === ChatFetchResponseType.QuotaExceeded) {
+				return {
+					type: ChatFetchResponseType.QuotaExceeded,
+					reason,
+					requestId: generateUuid(),
+					serverRequestId: undefined,
+					retryAfter: undefined
+				};
+			}
+
 			return {
 				type: ChatFetchResponseType.Failed,
-				reason: toErrorMessage(e, true),
+				reason,
 				requestId: generateUuid(),
 				serverRequestId: undefined
 			};
@@ -437,4 +462,50 @@ export function convertToApiChatMessage(messages: Raw.ChatMessage[]): Array<vsco
 		}
 	}
 	return apiMessages;
+}
+
+/**
+ * Classifies errors from extension-contributed (BYOK) language model providers
+ * into more specific {@link ChatFetchResponseType} values.
+ *
+ * Many BYOK providers (OpenAI, Anthropic, Gemini, etc.) return HTTP status codes
+ * or error messages that indicate rate limiting or quota exhaustion. Without this
+ * classification, all errors would be collapsed into `Failed`, making it impossible
+ * for callers to distinguish between transient errors (rate limit) and permanent
+ * errors (bad API key).
+ */
+function classifyExtensionContributedError(error: unknown, reason: string): ChatFetchResponseType.RateLimited | ChatFetchResponseType.QuotaExceeded | ChatFetchResponseType.Failed {
+	const message = (error as any)?.message ?? '';
+	const statusCode = (error as any)?.statusCode ?? (error as any)?.status;
+	const combinedText = (message + ' ' + reason).toLowerCase();
+
+	// Rate limiting: HTTP 429 or common rate-limit error phrases
+	if (statusCode === 429 ||
+		combinedText.includes('rate limit') ||
+		combinedText.includes('too many requests') ||
+		combinedText.includes('rate_limited') ||
+		combinedText.includes('rateLimited') ||
+		combinedText.includes('overloaded')) {
+		return ChatFetchResponseType.RateLimited;
+	}
+
+	// Quota exhaustion: HTTP 402/403 with quota-related messages
+	if ((statusCode === 402 || statusCode === 403) &&
+		(combinedText.includes('quota') ||
+			combinedText.includes('billing') ||
+			combinedText.includes('insufficient') ||
+			combinedText.includes('payment') ||
+			combinedText.includes('subscription'))) {
+		return ChatFetchResponseType.QuotaExceeded;
+	}
+
+	// Also match quota in the message regardless of status code (some providers
+	// return 400 or 500 with quota error messages)
+	if (combinedText.includes('quota exceeded') ||
+		combinedText.includes('quota_exceeded') ||
+		combinedText.includes('exceeded quota')) {
+		return ChatFetchResponseType.QuotaExceeded;
+	}
+
+	return ChatFetchResponseType.Failed;
 }

@@ -176,6 +176,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private static readonly SETUP_NEEDED_MESSAGE = new MarkdownString(localize('settingUpCopilotNeeded', "You need to set up GitHub Copilot and be signed in to use Chat."));
+	private static readonly BYOK_SETUP_NEEDED_MESSAGE = new MarkdownString(localize('byokSetupNeeded', "Chat requires a configured language model. Check your language model settings."));
 	private static readonly TRUST_NEEDED_MESSAGE = new MarkdownString(localize('trustNeeded', "You need to trust this workspace to use Chat."));
 
 	private static readonly CHAT_RETRY_COMMAND_ID = 'workbench.action.chat.retrySetup';
@@ -259,9 +260,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		const hasByokModels = this.chatEntitlementService.hasByokModels;
 		if (
 			(!this.context.state.completed && !hasByokModels) ||				// Setup not completed (unless BYOK models are available)
-			this.context.state.disabled ||										// Extension disabled: run setup to enable
-			this.context.state.untrusted ||										// Workspace untrusted: run setup to ask for trust
-			this.context.state.entitlement === ChatEntitlement.Available ||		// Entitlement available: run setup to sign up
+			(this.context.state.disabled && !hasByokModels) ||					// Extension disabled: run setup to enable (unless BYOK models are available)
+			(this.context.state.untrusted && !hasByokModels) ||				// Workspace untrusted: run setup to ask for trust (unless BYOK models are available)
+			(this.context.state.entitlement === ChatEntitlement.Available && !hasByokModels) ||	// Entitlement available: run setup to sign up (unless BYOK models are available)
 			(
 				this.context.state.entitlement === ChatEntitlement.Unknown &&	// Entitlement unknown: run setup to sign in / sign up
 				!this.chatEntitlementService.anonymous &&						// unless anonymous access is enabled
@@ -738,9 +739,13 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 
 		// User has cancelled the setup
 		else {
+			const hasByokModels = this.chatEntitlementService.hasByokModels;
+			const message = !this.workspaceTrustManagementService.isWorkspaceTrusted()
+				? SetupAgent.TRUST_NEEDED_MESSAGE
+				: (hasByokModels ? SetupAgent.BYOK_SETUP_NEEDED_MESSAGE : SetupAgent.SETUP_NEEDED_MESSAGE);
 			progress({
 				kind: 'markdownContent',
-				content: this.workspaceTrustManagementService.isWorkspaceTrusted() ? SetupAgent.SETUP_NEEDED_MESSAGE : SetupAgent.TRUST_NEEDED_MESSAGE
+				content: message
 			});
 		}
 
