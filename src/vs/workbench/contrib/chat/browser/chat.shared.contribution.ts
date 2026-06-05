@@ -202,6 +202,7 @@ import { ChatTipService, IChatTipService } from './chatTipService.js';
 import { ChatQueuePickerRendering } from './widget/input/chatQueuePickerActionItem.js';
 import { ExploreAgentDefaultModel } from './exploreAgentDefaultModel.js';
 import { PlanAgentDefaultModel } from './planAgentDefaultModel.js';
+import { EmbeddingModelContribution } from './embeddingModelContribution.js';
 import { UtilityModelContribution, UtilitySmallModelContribution } from './utilityModelContribution.js';
 import { ChatImageCarouselService, IChatImageCarouselService } from './chatImageCarouselService.js';
 import { browserChatToolReferenceNames } from '../../browserView/common/browserChatToolReferenceNames.js';
@@ -1224,6 +1225,14 @@ configurationRegistry.registerConfiguration({
 			enum: UtilitySmallModelContribution.modelIds,
 			enumItemLabels: UtilitySmallModelContribution.modelLabels,
 			markdownEnumDescriptions: UtilitySmallModelContribution.modelDescriptions
+		},
+		[ChatConfiguration.EmbeddingModel]: {
+			type: 'string',
+			description: nls.localize('chat.embeddingModel.description', "Override the embedding model used by built-in embedding flows (code search, context retrieval, etc.). Select from any embedding model registered by installed extensions. Leave empty to use the default model."),
+			default: '',
+			enum: EmbeddingModelContribution.modelIds,
+			enumItemLabels: EmbeddingModelContribution.modelLabels,
+			markdownEnumDescriptions: EmbeddingModelContribution.modelDescriptions
 		},
 		[ChatConfiguration.RequestQueueingDefaultAction]: {
 			type: 'string',

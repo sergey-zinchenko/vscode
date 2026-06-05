@@ -9,6 +9,7 @@ import * as vscode from 'vscode';
 import { IAuthenticationService } from '../../../platform/authentication/common/authentication';
 import { CopilotToken } from '../../../platform/authentication/common/copilotToken';
 import { IBlockedExtensionService } from '../../../platform/chat/common/blockedExtensionService';
+import { IConfigurationService } from '../../../platform/configuration/common/configurationService';
 import { ChatFetchResponseType, ChatLocation, getErrorDetailsFromChatFetchError } from '../../../platform/chat/common/commonTypes';
 import { getTextPart } from '../../../platform/chat/common/globalStringUtils';
 import { EmbeddingType, getWellKnownEmbeddingTypeInfo, IEmbeddingsComputer } from '../../../platform/embeddings/common/embeddingsComputer';
@@ -35,6 +36,7 @@ import { TelemetryCorrelationId } from '../../../util/common/telemetryCorrelatio
 import { Emitter } from '../../../util/vs/base/common/event';
 import { Disposable, MutableDisposable } from '../../../util/vs/base/common/lifecycle';
 import { isBoolean, isDefined, isNumber, isString, isStringArray } from '../../../util/vs/base/common/types';
+import { localize } from '../../../util/vs/nls';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { ChatLocation as ApiChatLocation, ExtensionMode } from '../../../vscodeTypes';
 import type { LMResponsePart } from '../../byok/common/byokProvider';
@@ -234,6 +236,7 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		@IVSCodeExtensionContext private readonly _vsCodeExtensionContext: IVSCodeExtensionContext,
 		@IAutomodeService private readonly _automodeService: IAutomodeService,
 		@IExperimentationService private readonly _expService: IExperimentationService,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
 	) {
 		super();
 
@@ -534,7 +537,52 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 
 
 		const update = async () => {
+			// Check if the user has selected a non-Copilot embedding model.
+			// When they have, we register a delegate provider that forwards
+			// to vscode.lm.computeEmbeddings — no Copilot token required.
+			const embeddingModelOverride = this._configurationService.getNonExtensionConfig<string>('chat.embeddingModel');
+			const hasUserSelectedModel = embeddingModelOverride
+				&& typeof embeddingModelOverride === 'string'
+				&& embeddingModelOverride.length > 0
+				&& !embeddingModelOverride.startsWith('copilot.');
 
+			if (hasUserSelectedModel) {
+				// Verify the model is still registered. If the provider extension
+				// was disabled or uninstalled, fall back to the default path.
+				try {
+					const registeredModels = vscode.lm.embeddingModels;
+					if (!registeredModels.includes(embeddingModelOverride)) {
+						this._logService.warn(
+							`[LanguageModelAccess] Embedding model '${embeddingModelOverride}' is no longer registered; falling back to default.`,
+						);
+						vscode.window.showWarningMessage(
+							localize('embeddingModel.noLongerRegistered', "The embedding model '{0}' is no longer available. Falling back to the default model.", embeddingModelOverride),
+						);
+						// Fall through to the default path below.
+					} else {
+						dispo.clear();
+						dispo.value = vscode.lm.registerEmbeddingsProvider(embeddingModelOverride, new class implements vscode.EmbeddingsProvider {
+							async provideEmbeddings(input: string[], token: vscode.CancellationToken): Promise<vscode.Embedding[]> {
+								return vscode.lm.computeEmbeddings(embeddingModelOverride, input, token);
+							}
+						});
+						return;
+					}
+				} catch {
+					// embeddingModels is a proposed API; if it throws, proceed
+					// with registration and let computeEmbeddings fail if unavailable.
+					dispo.clear();
+					dispo.value = vscode.lm.registerEmbeddingsProvider(embeddingModelOverride, new class implements vscode.EmbeddingsProvider {
+						async provideEmbeddings(input: string[], token: vscode.CancellationToken): Promise<vscode.Embedding[]> {
+							return vscode.lm.computeEmbeddings(embeddingModelOverride, input, token);
+						}
+					});
+					return;
+				}
+			}
+
+			// No override — fall back to the default Copilot embedding model,
+			// which requires a valid Copilot token.
 			if (!await this._getToken()) {
 				dispo.clear();
 				return;
@@ -557,6 +605,13 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		};
 
 		this._register(this._authenticationService.onDidAuthenticationChange(() => update()));
+		// Re-register when the user changes their embedding model selection.
+		this._register(vscode.lm.onDidChangeEmbeddingModels(() => update()));
+		this._register(vscode.workspace.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('chat.embeddingModel')) {
+				update();
+			}
+		}));
 		await update();
 	}
 

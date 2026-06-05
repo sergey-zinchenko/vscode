@@ -10,6 +10,7 @@ import { Limiter } from '../../../util/vs/base/common/async';
 import { generateUuid } from '../../../util/vs/base/common/uuid';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { IAuthenticationService } from '../../authentication/common/authentication';
+import { ExtensionContributedEmbeddingEndpoint } from '../../endpoint/vscode-node/extEmbeddingEndpoint';
 import { IEndpointProvider } from '../../endpoint/common/endpointProvider';
 import { IEnvService } from '../../env/common/envService';
 import { getGithubMetadataHeaders } from '../../github/common/githubApiFetcherService';
@@ -64,6 +65,13 @@ export class RemoteEmbeddingsComputer implements IEmbeddingsComputer {
 		});
 		try {
 			return await logExecTime(this._logService, 'RemoteEmbeddingsComputer::computeEmbeddings', async () => {
+				// Check if the user has configured an extension-contributed embedding model.
+				// Extension-contributed endpoints don't require a Copilot token.
+				const endpoint = await this._endpointProvider.getEmbeddingsEndpoint('text3small');
+				if (endpoint instanceof ExtensionContributedEmbeddingEndpoint) {
+					return this.computeExtensionContributedEmbeddings(endpoint, embeddingType, inputs, cancellationToken);
+				}
+
 				// The remote embeddings endpoint requires a Copilot token.
 				if (!this._authService.hasCopilotTokenSource) {
 					return { type: embeddingType, values: [] };
@@ -165,6 +173,43 @@ export class RemoteEmbeddingsComputer implements IEmbeddingsComputer {
 		} finally {
 			otelSpan.end();
 		}
+	}
+
+	/**
+	 * Computes embeddings using an extension-contributed endpoint (e.g., a
+	 * BYOK provider registered via `vscode.lm.registerEmbeddingsProvider`).
+	 * Bypasses authentication entirely since the provider handles its own
+	 * credentials.
+	 */
+	private async computeExtensionContributedEmbeddings(
+		endpoint: ExtensionContributedEmbeddingEndpoint,
+		embeddingType: EmbeddingType,
+		inputs: readonly string[],
+		cancellationToken: CancellationToken | undefined,
+	): Promise<Embeddings> {
+		const embeddingsOut: Embedding[] = [];
+		for (let i = 0; i < inputs.length; i += this.batchSize) {
+			const batch = inputs.slice(i, i + this.batchSize);
+			if (!batch.length) {
+				break;
+			}
+
+			if (cancellationToken?.isCancellationRequested) {
+				break;
+			}
+
+			try {
+				const vectors = await endpoint.computeEmbeddings(Array.from(batch), cancellationToken);
+				embeddingsOut.push(...vectors.map(value => ({ type: embeddingType, value })));
+			} catch (err) {
+				this._logService.warn(
+					`[RemoteEmbeddingsComputer] Extension-contributed embedding request failed: ${err}`,
+				);
+				return { type: embeddingType, values: [] };
+			}
+		}
+
+		return { type: embeddingType, values: embeddingsOut };
 	}
 
 	private async computeCAPIEmbeddings(
