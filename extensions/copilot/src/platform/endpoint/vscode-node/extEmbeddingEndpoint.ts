@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import { ITokenizer, TokenizerType } from '../../../util/common/tokenizer';
+import { EmbeddingType } from '../../embeddings/common/embeddingsComputer';
 import { IEmbeddingsEndpoint } from '../../networking/common/networking';
 
 /**
@@ -19,6 +20,9 @@ export class ExtensionContributedEmbeddingEndpoint implements IEmbeddingsEndpoin
 	public readonly maxBatchSize: number;
 	public readonly modelMaxPromptTokens: number;
 
+	private _embeddingType: EmbeddingType;
+	private _dimensions: number | undefined;
+
 	private static readonly DEFAULT_MAX_BATCH_SIZE = 100;
 	private static readonly DEFAULT_MAX_PROMPT_TOKENS = 8191;
 
@@ -27,6 +31,23 @@ export class ExtensionContributedEmbeddingEndpoint implements IEmbeddingsEndpoin
 	) {
 		this.maxBatchSize = ExtensionContributedEmbeddingEndpoint.DEFAULT_MAX_BATCH_SIZE;
 		this.modelMaxPromptTokens = ExtensionContributedEmbeddingEndpoint.DEFAULT_MAX_PROMPT_TOKENS;
+		this._embeddingType = new EmbeddingType(this._modelId);
+	}
+
+	/**
+	 * The embedding type for this endpoint.
+	 * After the first successful computeEmbeddings call, this will include
+	 * the probed dimensions.
+	 */
+	get embeddingType(): EmbeddingType {
+		return this._embeddingType;
+	}
+
+	/**
+	 * The probed dimensions of the embedding output, or undefined if not yet probed.
+	 */
+	get dimensions(): number | undefined {
+		return this._dimensions;
 	}
 
 	get urlOrRequestMetadata(): string {
@@ -62,12 +83,26 @@ export class ExtensionContributedEmbeddingEndpoint implements IEmbeddingsEndpoin
 	 * Computes embeddings for the given inputs by delegating to the
 	 * extension-contributed provider via `vscode.lm.computeEmbeddings`.
 	 *
+	 * On first successful call, probes the dimensions of the output
+	 * and updates {@link embeddingType} accordingly.
+	 *
 	 * @param inputs Array of strings to embed.
 	 * @param token Cancellation token.
 	 * @returns Array of embedding vectors, one per input.
 	 */
 	async computeEmbeddings(inputs: string[], token?: vscode.CancellationToken): Promise<number[][]> {
 		const results = await vscode.lm.computeEmbeddings(this._modelId, inputs, token);
-		return results.map(r => r.values);
+		const vectors = results.map(r => r.values);
+
+		// Probe dimensions on first successful call
+		if (this._dimensions === undefined && vectors.length > 0 && vectors[0].length > 0) {
+			this._dimensions = vectors[0].length;
+			// Update the embedding type with the probed dimensions.
+			// This ensures downstream consumers (cache, distance checks) get
+			// the correct dimension information.
+			this._embeddingType = new EmbeddingType(this._modelId, this._dimensions);
+		}
+
+		return vectors;
 	}
 }

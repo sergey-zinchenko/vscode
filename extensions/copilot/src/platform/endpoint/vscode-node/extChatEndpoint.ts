@@ -191,15 +191,15 @@ export class ExtensionContributedChatEndpoint implements IChatEndpoint {
 			modelOptions: {
 				_capturingTokenCorrelationId: ourRequestId,
 				_otelTraceContext: activeTraceCtx ?? null,
-			...(telemetryTurn !== undefined ? { _telemetryTurn: telemetryTurn } : {}),
-			// Forward reasoning/thinking settings so the extension provider can use them.
-			// The provider receives these via ProvideLanguageModelChatResponseOptions.modelOptions.
-			...(modelCapabilities?.enableThinking !== undefined
-				? { enableThinking: modelCapabilities.enableThinking }
-				: {}),
-			...(modelCapabilities?.reasoningEffort
-				? { reasoningEffort: modelCapabilities.reasoningEffort }
-				: {}),
+				...(telemetryTurn !== undefined ? { _telemetryTurn: telemetryTurn } : {}),
+				// Forward reasoning/thinking settings so the extension provider can use them.
+				// The provider receives these via ProvideLanguageModelChatResponseOptions.modelOptions.
+				...(modelCapabilities?.enableThinking !== undefined
+					? { enableThinking: modelCapabilities.enableThinking }
+					: {}),
+				...(modelCapabilities?.reasoningEffort
+					? { reasoningEffort: modelCapabilities.reasoningEffort }
+					: {}),
 			}
 		};
 
@@ -393,7 +393,6 @@ function apiUsageFromLanguageModelUsagePart(usage: vscode.LanguageModelUsagePart
 			? { prompt_tokens_details: { cached_tokens: Math.max(0, cached) } }
 			: {}),
 	};
-}
 }
 
 export function convertToApiChatMessage(messages: Raw.ChatMessage[]): Array<vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage2> {

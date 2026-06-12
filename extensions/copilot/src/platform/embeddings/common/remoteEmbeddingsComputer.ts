@@ -180,13 +180,21 @@ export class RemoteEmbeddingsComputer implements IEmbeddingsComputer {
 	 * BYOK provider registered via `vscode.lm.registerEmbeddingsProvider`).
 	 * Bypasses authentication entirely since the provider handles its own
 	 * credentials.
+	 *
+	 * Uses the endpoint's own `embeddingType` rather than the caller's type,
+	 * so that the returned embeddings carry the correct type metadata.
 	 */
 	private async computeExtensionContributedEmbeddings(
 		endpoint: ExtensionContributedEmbeddingEndpoint,
-		embeddingType: EmbeddingType,
+		_embeddingType: EmbeddingType,
 		inputs: readonly string[],
 		cancellationToken: CancellationToken | undefined,
 	): Promise<Embeddings> {
+		// Use the endpoint's embedding type so downstream consumers get the
+		// correct type (with dimensions, if known) rather than the caller's
+		// well-known type.
+		const type = endpoint.embeddingType;
+
 		const embeddingsOut: Embedding[] = [];
 		for (let i = 0; i < inputs.length; i += this.batchSize) {
 			const batch = inputs.slice(i, i + this.batchSize);
@@ -200,16 +208,16 @@ export class RemoteEmbeddingsComputer implements IEmbeddingsComputer {
 
 			try {
 				const vectors = await endpoint.computeEmbeddings(Array.from(batch), cancellationToken);
-				embeddingsOut.push(...vectors.map(value => ({ type: embeddingType, value })));
+				embeddingsOut.push(...vectors.map(value => ({ type, value })));
 			} catch (err) {
 				this._logService.warn(
 					`[RemoteEmbeddingsComputer] Extension-contributed embedding request failed: ${err}`,
 				);
-				return { type: embeddingType, values: [] };
+				return { type, values: [] };
 			}
 		}
 
-		return { type: embeddingType, values: embeddingsOut };
+		return { type, values: embeddingsOut };
 	}
 
 	private async computeCAPIEmbeddings(
