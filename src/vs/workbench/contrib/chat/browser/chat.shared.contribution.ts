@@ -203,7 +203,7 @@ import { ChatQueuePickerRendering } from './widget/input/chatQueuePickerActionIt
 import { ExploreAgentDefaultModel } from './exploreAgentDefaultModel.js';
 import { PlanAgentDefaultModel } from './planAgentDefaultModel.js';
 import { EmbeddingModelContribution } from './embeddingModelContribution.js';
-import { UtilityModelContribution, UtilitySmallModelContribution } from './utilityModelContribution.js';
+import { RiskAssessmentModelContribution, UtilityModelContribution, UtilitySmallModelContribution } from './utilityModelContribution.js';
 import { ChatImageCarouselService, IChatImageCarouselService } from './chatImageCarouselService.js';
 import { browserChatToolReferenceNames } from '../../browserView/common/browserChatToolReferenceNames.js';
 
@@ -1187,8 +1187,11 @@ configurationRegistry.registerConfiguration({
 		},
 		[ChatConfiguration.ToolRiskAssessmentModel]: {
 			type: 'string',
-			description: nls.localize('chat.tools.riskAssessment.model', "The language model id used to generate tool risk assessments. Should be a small, fast model."),
-			default: 'copilot-utility-small',
+			description: nls.localize('chat.tools.riskAssessment.model', "The language model used to generate tool risk assessments. Should be a small, fast model. Leave empty to use the default model."),
+			default: '',
+			enum: RiskAssessmentModelContribution.modelIds,
+			enumItemLabels: RiskAssessmentModelContribution.modelLabels,
+			markdownEnumDescriptions: RiskAssessmentModelContribution.modelDescriptions,
 			tags: ['experimental', 'advanced'],
 			experiment: {
 				mode: 'auto'

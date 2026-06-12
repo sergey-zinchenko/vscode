@@ -4309,6 +4309,7 @@
             "default": "",
             "scope": "resource",
             "markdownDescription": "%github.copilot.config.exploreAgent.model%",
+            "deprecationMessage": "%github.copilot.config.exploreAgent.model.deprecated%",
             "tags": [
               "experimental"
             ]
@@ -4523,6 +4524,7 @@
             "type": "string",
             "default": "",
             "markdownDescription": "%github.copilot.config.workspace.preferredEmbeddingsModel%",
+            "deprecationMessage": "%github.copilot.config.workspace.preferredEmbeddingsModel.deprecated%",
             "tags": [
               "advanced",
               "experimental",
