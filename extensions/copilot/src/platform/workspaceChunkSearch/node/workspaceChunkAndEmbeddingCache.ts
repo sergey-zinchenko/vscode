@@ -47,6 +47,12 @@ export interface IWorkspaceChunkAndEmbeddingCache extends IDisposable {
 
 	getCurrentChunksForUri(uri: URI): ReadonlyMap<string, FileChunkWithEmbedding> | undefined;
 
+	/** URIs of files stored in the embedding cache database. */
+	getCachedFileUris(): readonly URI[];
+
+	/** File and chunk counts in the embedding cache database. */
+	getCachedStats(): { readonly fileCount: number; readonly chunkCount: number };
+
 	/**
 	 * Updates the cache for the given file by computing the chunks and embeddings.
 	 * Returns the updated chunks and embeddings.
@@ -263,6 +269,25 @@ class DbCache implements IWorkspaceChunkAndEmbeddingCache {
 		}
 
 		return undefined;
+	}
+
+	getCachedFileUris(): readonly URI[] {
+		const rows = this.db.prepare('SELECT uri FROM Files').all() as Array<{ uri: string }>;
+		const uris: URI[] = [];
+		for (const row of rows) {
+			try {
+				uris.push(URI.parse(row.uri));
+			} catch {
+				// skip malformed uri
+			}
+		}
+		return uris;
+	}
+
+	getCachedStats(): { fileCount: number; chunkCount: number } {
+		const fileCount = (this.db.prepare('SELECT COUNT(*) AS count FROM Files').get() as { count: number }).count;
+		const chunkCount = (this.db.prepare('SELECT COUNT(*) AS count FROM FileChunks').get() as { count: number }).count;
+		return { fileCount, chunkCount };
 	}
 
 	private async getEntry(file: FileRepresentation): Promise<CacheEntry | undefined> {

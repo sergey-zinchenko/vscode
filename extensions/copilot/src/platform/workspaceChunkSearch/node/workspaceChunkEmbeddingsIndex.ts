@@ -12,6 +12,7 @@ import { CancellationError } from '../../../util/vs/base/common/errors';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { ResourceMap } from '../../../util/vs/base/common/map';
+import { Schemas } from '../../../util/vs/base/common/network';
 import { extname } from '../../../util/vs/base/common/resources';
 import { URI } from '../../../util/vs/base/common/uri';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
@@ -132,6 +133,11 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			throw new CancellationError();
 		}
 
+		const cacheLocation = this._cacheRoot?.scheme === Schemas.file
+			? URI.joinPath(this._cacheRoot, 'workspace-chunks.db').fsPath
+			: ':memory:';
+		this._logService.info(`WorkspaceChunkEmbeddingsIndex: opened embedding cache (${cacheLocation})`);
+
 		this._onDidChangeWorkspaceIndexState.fire();
 		return this._register(cache);
 	}
@@ -251,8 +257,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 	}
 
 	/**
-	 * BYOK semantic search: lexically narrow to candidate files, then embed and rank only those files.
-	 * Avoids indexing the entire workspace on every query (required for large repos without GitHub code search).
+	 * BYOK semantic search: embed up to 20 lexical candidates, union with all cached embeddings, rank.
 	 */
 	async searchByokWorkspace(
 		queryText: string,
@@ -270,33 +275,69 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 				token,
 			);
 			this._logService.info(
-				`WorkspaceChunkEmbeddingsIndex: BYOK search found ${candidateFiles.length} candidate file(s) for query`,
+				`WorkspaceChunkEmbeddingsIndex: BYOK search found ${candidateFiles.length} lexical candidate file(s) for query`,
 			);
 
-			if (candidateFiles.length === 0) {
-				return [];
-			}
-
-			const [queryEmbedding, fileChunksAndEmbeddings] = await raceCancellationError(Promise.all([
+			const batchInfo = new ComputeBatchInfo();
+			const [queryEmbedding, lexicalEmbeddings] = await raceCancellationError(Promise.all([
 				query,
-				this.getEmbeddingsForFiles(
-					candidateFiles,
-					options.globPatterns ?? {},
-					EmbeddingsComputeQos.Batch,
-					{ info: telemetryInfo.addCaller('WorkspaceChunkEmbeddingsIndex::searchByokWorkspace') },
-					token,
-					byokMaxParallelEmbeddingOps,
-					byokMaxChunksPerFile,
-				),
+				candidateFiles.length > 0
+					? this.getEmbeddingsForFiles(
+						candidateFiles,
+						options.globPatterns ?? {},
+						EmbeddingsComputeQos.Batch,
+						{ info: telemetryInfo.addCaller('WorkspaceChunkEmbeddingsIndex::searchByokWorkspace'), batchInfo },
+						token,
+						byokMaxParallelEmbeddingOps,
+						byokMaxChunksPerFile,
+					)
+					: Promise.resolve([]),
 			]), token);
 
-			if (fileChunksAndEmbeddings.length === 0) {
-				this._logService.warn(
-					`WorkspaceChunkEmbeddingsIndex: BYOK search produced no embeddings for ${candidateFiles.length} candidate file(s)`,
+			if (candidateFiles.length > 0) {
+				const lexicalCacheHits = candidateFiles.length - batchInfo.recomputedFileCount;
+				const lexicalCacheHitPct = Math.round((lexicalCacheHits / candidateFiles.length) * 100);
+				this._logService.info(
+					`WorkspaceChunkEmbeddingsIndex: BYOK lexical candidates: ${lexicalCacheHits}/${candidateFiles.length} files from cache ` +
+					`(${lexicalCacheHitPct}% cache hit), ${batchInfo.recomputedFileCount} newly embedded, ${lexicalEmbeddings.length} chunk(s)`,
 				);
 			}
 
-			return this.rankEmbeddings(queryEmbedding, fileChunksAndEmbeddings, maxResults);
+			const cachedEmbeddings = await raceCancellationError(
+				this.getAllCachedEmbeddings(options.globPatterns ?? {}, token),
+				token,
+			);
+
+			const searchEmbeddings = this.mergeByokLexicalAndCachedEmbeddings(
+				candidateFiles,
+				lexicalEmbeddings,
+				cachedEmbeddings,
+			);
+
+			const lexicalFileUris = new Set(candidateFiles.map(uri => uri.toString()));
+			const cachedOnlyChunks = cachedEmbeddings.filter(
+				chunk => !lexicalFileUris.has(chunk.chunk.file.toString()),
+			);
+			const cachedOnlyFileCount = new Set(cachedOnlyChunks.map(chunk => chunk.chunk.file.toString())).size;
+			const cache = await this.getCache(token);
+			const { fileCount: dbFileCount, chunkCount: dbChunkCount } = cache.getCachedStats();
+
+			this._logService.info(
+				`WorkspaceChunkEmbeddingsIndex: BYOK rank pool: ${searchEmbeddings.length} chunk(s) ` +
+				`(${lexicalEmbeddings.length} from lexical candidates + ${cachedOnlyChunks.length} from ${cachedOnlyFileCount} other cached file(s); ` +
+				`database: ${dbFileCount} file(s), ${dbChunkCount} chunk(s))`,
+			);
+
+			if (searchEmbeddings.length === 0) {
+				this._logService.warn(`WorkspaceChunkEmbeddingsIndex: BYOK search has no embeddings to rank`);
+				return [];
+			}
+
+			const results = this.rankEmbeddings(queryEmbedding, searchEmbeddings, maxResults);
+			this._logService.info(
+				`WorkspaceChunkEmbeddingsIndex: BYOK search returned ${results.length} result chunk(s) (maxResults=${maxResults})`,
+			);
+			return results;
 		}, (execTime, status) => {
 			this._telemetryService.sendMSFTTelemetryEvent('workspaceChunkEmbeddingsIndex.perf.searchByokWorkspace', {
 				status,
@@ -304,6 +345,19 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 				workspaceSearchCorrelationId: telemetryInfo.correlationId,
 			}, { execTime });
 		});
+	}
+
+	/** Lexical candidate chunks plus all other cached chunks (lexical wins on overlap). */
+	private mergeByokLexicalAndCachedEmbeddings(
+		lexicalCandidateFiles: readonly URI[],
+		lexicalEmbeddings: readonly FileChunkWithEmbedding[],
+		cachedEmbeddings: readonly FileChunkWithEmbedding[],
+	): FileChunkWithEmbedding[] {
+		const lexicalFileUris = new Set(lexicalCandidateFiles.map(uri => uri.toString()));
+		const cachedOutsideLexical = cachedEmbeddings.filter(
+			chunk => !lexicalFileUris.has(chunk.chunk.file.toString()),
+		);
+		return [...cachedOutsideLexical, ...lexicalEmbeddings];
 	}
 
 	private async findByokCandidateFiles(
@@ -598,6 +652,32 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		return coalesce(perFileChunks).flat();
 	}
 
+	private async getAllCachedEmbeddings(include: GlobIncludeOptions, token: CancellationToken): Promise<FileChunkWithEmbedding[]> {
+		const cache = await this.getCache(token);
+		const cachedUris = cache.getCachedFileUris();
+
+		const limiter = new Limiter<readonly FileChunkWithEmbedding[] | undefined>(maxParallelEmbeddingOps);
+		const perFileChunks = await raceCancellationError(Promise.all(cachedUris.map(uri => {
+			return limiter.queue(async () => {
+				if (token.isCancellationRequested) {
+					throw new CancellationError();
+				}
+				if (!shouldInclude(uri, include)) {
+					return;
+				}
+
+				const file = this._workspaceIndex.get(uri);
+				if (!file) {
+					return;
+				}
+
+				return raceCancellationError(cache.get(file), token);
+			});
+		})), token);
+
+		return coalesce(perFileChunks).flat();
+	}
+
 	private async getEmbeddingsForFiles(files: readonly URI[], include: GlobIncludeOptions, qos: EmbeddingsComputeQos, telemetry: { info: TelemetryCorrelationId; batchInfo?: ComputeBatchInfo }, token: CancellationToken, maxParallel = maxParallelEmbeddingOps, maxChunksPerFile?: number): Promise<FileChunkWithEmbedding[]> {
 		const batchInfo = telemetry.batchInfo ?? new ComputeBatchInfo();
 
@@ -661,9 +741,11 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		const cache = await this.getCache(token);
 		const existing = await raceCancellationError(cache.get(file), token);
 		if (existing) {
+			this._logService.trace(`WorkspaceChunkEmbeddingsIndex: cache hit for ${file.uri.fsPath} (${existing.length} chunk(s))`);
 			return existing;
 		}
 
+		this._logService.trace(`WorkspaceChunkEmbeddingsIndex: cache miss for ${file.uri.fsPath}, computing embeddings`);
 		const cachedChunks = cache.getCurrentChunksForUri(file.uri);
 		const chunksAndEmbeddings = await cache.update(file, async token => {
 			return this._chunkingEndpointClient.computeChunksAndEmbeddings(
