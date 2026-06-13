@@ -273,8 +273,9 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 	private readonly shouldEagerlyIndexKey = 'workspaceChunkSearch.shouldEagerlyIndex';
 	private readonly hasPromptedForExternalIngestKey = 'workspaceChunkSearch.externalIngest.prompted';
 
-	private readonly _codeSearchChunkSearch: CodeSearchChunkSearch;
+	private readonly _codeSearchChunkSearch: CodeSearchChunkSearch | undefined;
 	private readonly _useByokLocalSearch: boolean;
+	private readonly _remoteCodeSearchDisabled: boolean;
 	private readonly _localEmbeddingsIndex: WorkspaceChunkEmbeddingsIndex | undefined;
 
 	private readonly _onDidChangeIndexState = this._register(new Emitter<void>());
@@ -283,6 +284,7 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 	constructor(
 		private readonly _embeddingType: EmbeddingType,
 		@IInstantiationService instantiationService: IInstantiationService,
+		@IAuthenticationService private readonly _authenticationService: IAuthenticationService,
 		@IEmbeddingsComputer private readonly _embeddingsComputer: IEmbeddingsComputer,
 		@IIgnoreService private readonly _ignoreService: IIgnoreService,
 		@ILogService private readonly _logService: ILogService,
@@ -303,14 +305,26 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 			this._logService.info(`WorkspaceChunkSearchService: BYOK local semantic search enabled for ${this._embeddingType.id}`);
 		}
 
-		this._codeSearchChunkSearch = this._register(instantiationService.createInstance(CodeSearchChunkSearch, this._embeddingType));
+		// Remote GitHub/ADO code search is pointless when we run on local BYOK
+		// embeddings or when there is no usable Copilot subscription. In those
+		// cases we must not create/initialize the code search machinery, otherwise
+		// it issues failing GitHub index-status requests ("No valid github auth token").
+		const copilotToken = this._authenticationService.copilotToken;
+		const hasUsableCopilotToken = !!copilotToken && !copilotToken.isNoAuthUser;
+		this._remoteCodeSearchDisabled = this._useByokLocalSearch || !hasUsableCopilotToken;
 
-		this._register(
-			Event.debounce(
-				this._codeSearchChunkSearch.onDidChangeIndexState,
-				() => { },
-				250
-			)(() => this._onDidChangeIndexState.fire()));
+		if (!this._remoteCodeSearchDisabled) {
+			this._codeSearchChunkSearch = this._register(instantiationService.createInstance(CodeSearchChunkSearch, this._embeddingType));
+
+			this._register(
+				Event.debounce(
+					this._codeSearchChunkSearch.onDidChangeIndexState,
+					() => { },
+					250
+				)(() => this._onDidChangeIndexState.fire()));
+		} else {
+			this._logService.info(`WorkspaceChunkSearchService: remote code search disabled (byok=${this._useByokLocalSearch}, hasCopilotToken=${hasUsableCopilotToken})`);
+		}
 
 		/* __GDPR__
 			"workspaceChunkSearch.created" : {
@@ -325,6 +339,15 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 	}
 
 	async getIndexState(): Promise<WorkspaceIndexState> {
+		if (!this._codeSearchChunkSearch) {
+			return {
+				remoteIndexState: {
+					status: 'disabled',
+					repos: [],
+				},
+			};
+		}
+
 		return {
 			remoteIndexState: this._codeSearchChunkSearch.getRemoteIndexState(this.hasPromptedForExternalIngest),
 		};
@@ -335,15 +358,21 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 			await this._workspaceFileIndex.initialize();
 			return this._workspaceFileIndex.fileCount > 0;
 		}
+		if (!this._codeSearchChunkSearch) {
+			return false;
+		}
 		return this._codeSearchChunkSearch.isAvailable(new TelemetryCorrelationId('WorkspaceChunkSearchServiceImpl.isAvailable'), false, CancellationToken.None);
 	}
 
-	triggerIndexing(trigger: BuildIndexTriggerReason, onProgress: (message: string) => void, telemetryInfo: TelemetryCorrelationId, token: CancellationToken): Promise<Result<true, TriggerIndexingError>> {
+	async triggerIndexing(trigger: BuildIndexTriggerReason, onProgress: (message: string) => void, telemetryInfo: TelemetryCorrelationId, token: CancellationToken): Promise<Result<true, TriggerIndexingError>> {
+		if (!this._codeSearchChunkSearch) {
+			return Result.ok<true>(true);
+		}
 		return this._codeSearchChunkSearch.triggerIndexing(trigger, onProgress, telemetryInfo, token);
 	}
 
 	async enableExternalIngest(): Promise<boolean> {
-		if (!this._codeSearchChunkSearch.canExternalIngestBeEnabled()) {
+		if (!this._codeSearchChunkSearch || !this._codeSearchChunkSearch.canExternalIngestBeEnabled()) {
 			return false;
 		}
 
@@ -351,14 +380,23 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 		return this._codeSearchChunkSearch.enableExternalIngest();
 	}
 
-	deleteExternalIngestWorkspaceIndex(): Promise<void> {
+	async deleteExternalIngestWorkspaceIndex(): Promise<void> {
+		if (!this._codeSearchChunkSearch) {
+			return;
+		}
 		return this._codeSearchChunkSearch.deleteExternalIngestWorkspaceIndex(
 			new TelemetryCorrelationId('WorkspaceChunkSearchService::deleteExternalIngestWorkspaceIndex'),
 			CancellationToken.None);
 	}
 
-	getDiagnosticsDump(): AsyncIterable<string> {
-		return this._codeSearchChunkSearch.getDiagnosticsDump();
+	async *getDiagnosticsDump(): AsyncIterable<string> {
+		if (!this._codeSearchChunkSearch) {
+			yield this._useByokLocalSearch
+				? `Remote code search disabled: using BYOK local semantic search (${this._embeddingType.id}).`
+				: 'Remote code search disabled: no Copilot subscription.';
+			return;
+		}
+		yield* this._codeSearchChunkSearch.getDiagnosticsDump();
 	}
 
 	async searchFileChunks(
@@ -493,7 +531,7 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 	}
 
 	private async promptForExternalIngestIfNeeded(token: CancellationToken): Promise<void> {
-		if (this._useByokLocalSearch) {
+		if (this._useByokLocalSearch || !this._codeSearchChunkSearch) {
 			return;
 		}
 
@@ -561,7 +599,7 @@ class WorkspaceChunkSearchServiceImpl extends Disposable implements IWorkspaceCh
 
 				this._logService.error(e, `Error during BYOK local workspace search`);
 			}
-		} else {
+		} else if (this._codeSearchChunkSearch) {
 			try {
 				await raceCancellationError(this._codeSearchChunkSearch.prepareSearchWorkspace(telemetryInfo, token), token);
 
