@@ -31,7 +31,7 @@ import { BYOK_CHUNKING_AUTH_TOKEN, isByokEmbeddingModelConfigured } from '../../
 import { INaiveChunkingService } from '../node/naiveChunkerService';
 import { MAX_CHUNK_SIZE_TOKENS } from '../node/naiveChunker';
 import { FileChunk, FileChunkWithEmbedding, FileChunkWithOptionalEmbedding } from './chunk';
-import { ChunkableContent, ComputeBatchInfo, EmbeddingsComputeQos, IChunkingEndpointClient } from './chunkingEndpointClient';
+import { ChunkableContent, ChunkingComputeOptions, ComputeBatchInfo, EmbeddingsComputeQos, IChunkingEndpointClient } from './chunkingEndpointClient';
 import { stripChunkTextMetadata } from './chunkingStringUtils';
 
 type RequestTask = (attempt: number) => Promise<Response>;
@@ -318,8 +318,8 @@ export class ChunkingEndpointClientImpl extends Disposable implements IChunkingE
 		return this.doComputeChunksAndEmbeddings(authToken, embeddingType, content, batchInfo, { qos, computeEmbeddings: false }, cache, telemetryInfo, token);
 	}
 
-	public async computeChunksAndEmbeddings(authToken: string, embeddingType: EmbeddingType, content: ChunkableContent, batchInfo: ComputeBatchInfo, qos: EmbeddingsComputeQos, cache: ReadonlyMap<string, FileChunkWithEmbedding> | undefined, telemetryInfo: CallTracker, token: CancellationToken): Promise<readonly FileChunkWithEmbedding[] | undefined> {
-		const result = await this.doComputeChunksAndEmbeddings(authToken, embeddingType, content, batchInfo, { qos, computeEmbeddings: true }, cache, telemetryInfo, token);
+	public async computeChunksAndEmbeddings(authToken: string, embeddingType: EmbeddingType, content: ChunkableContent, batchInfo: ComputeBatchInfo, qos: EmbeddingsComputeQos, cache: ReadonlyMap<string, FileChunkWithEmbedding> | undefined, telemetryInfo: CallTracker, token: CancellationToken, computeOptions?: ChunkingComputeOptions): Promise<readonly FileChunkWithEmbedding[] | undefined> {
+		const result = await this.doComputeChunksAndEmbeddings(authToken, embeddingType, content, batchInfo, { qos, computeEmbeddings: true, maxChunks: computeOptions?.maxChunks }, cache, telemetryInfo, token);
 		return result as FileChunkWithEmbedding[] | undefined;
 	}
 
@@ -331,6 +331,7 @@ export class ChunkingEndpointClientImpl extends Disposable implements IChunkingE
 		options: {
 			qos: EmbeddingsComputeQos;
 			computeEmbeddings: boolean;
+			maxChunks?: number;
 		},
 		cache: ReadonlyMap<string, FileChunkWithEmbedding> | undefined,
 		telemetryInfo: CallTracker,
@@ -466,6 +467,7 @@ export class ChunkingEndpointClientImpl extends Disposable implements IChunkingE
 		batchInfo: ComputeBatchInfo,
 		options: {
 			computeEmbeddings: boolean;
+			maxChunks?: number;
 		},
 		token: CancellationToken,
 	): Promise<readonly FileChunkWithOptionalEmbedding[] | undefined> {
@@ -475,13 +477,20 @@ export class ChunkingEndpointClientImpl extends Disposable implements IChunkingE
 		}
 
 		const tokenizationEndpoint = { tokenizer: TokenizerType.O200K };
-		const chunks = await this._naiveChunkingService.chunkFile(
+		let chunks = await this._naiveChunkingService.chunkFile(
 			tokenizationEndpoint,
 			content.uri,
 			text,
 			{ maxTokenLength: MAX_CHUNK_SIZE_TOKENS },
 			token,
 		);
+
+		if (options.maxChunks !== undefined && chunks.length > options.maxChunks) {
+			this._logService.trace(
+				`[ChunkingEndpointClientImpl] BYOK search truncating ${content.uri} from ${chunks.length} to ${options.maxChunks} chunk(s)`,
+			);
+			chunks = chunks.slice(0, options.maxChunks);
+		}
 
 		if (!options.computeEmbeddings) {
 			return chunks.map(chunk => ({

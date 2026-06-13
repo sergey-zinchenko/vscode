@@ -45,13 +45,16 @@ export interface WorkspaceChunkEmbeddingsIndexState {
 const maxParallelEmbeddingOps = 50;
 
 /** Max files to lexically pre-filter before computing BYOK document embeddings. */
-const byokMaxCandidateFiles = 80;
+const byokMaxCandidateFiles = 20;
+
+/** Max chunks embedded per file during BYOK search (skips huge generated assets). */
+const byokMaxChunksPerFile = 16;
 
 /**
  * BYOK embedding backends (e.g. CPU vLLM) cannot absorb Copilot's default indexing parallelism.
  * Keep search-path concurrency low to avoid 503 overload and long upstream queues.
  */
-const byokMaxParallelEmbeddingOps = 2;
+const byokMaxParallelEmbeddingOps = 3;
 
 /** Max text-search matches collected per lexical query term. */
 const byokMaxTextSearchMatchesPerTerm = 150;
@@ -283,6 +286,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 					{ info: telemetryInfo.addCaller('WorkspaceChunkEmbeddingsIndex::searchByokWorkspace') },
 					token,
 					byokMaxParallelEmbeddingOps,
+					byokMaxChunksPerFile,
 				),
 			]), token);
 
@@ -307,17 +311,38 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		options: WorkspaceChunkSearchOptions,
 		token: CancellationToken,
 	): Promise<URI[]> {
-		const candidateFiles = new ResourceMap<void>();
+		const candidateScores = new ResourceMap<number>();
 		const searchTerms = this.getByokLexicalSearchTerms(queryText);
 
 		for (const term of searchTerms) {
-			if (candidateFiles.size >= byokMaxCandidateFiles || token.isCancellationRequested) {
+			if (token.isCancellationRequested) {
 				break;
 			}
-			await this.collectByokTextSearchMatches(term, options, candidateFiles, token);
+			await this.collectByokTextSearchMatches(term, options, candidateScores, token);
 		}
 
-		return Array.from(candidateFiles.keys());
+		return Array.from(candidateScores.entries())
+			.filter(([uri]) => shouldInclude(uri, options.globPatterns ?? {}) && !this.isExcludedByokSearchFile(uri))
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, byokMaxCandidateFiles)
+			.map(([uri]) => uri);
+	}
+
+	private isExcludedByokSearchFile(uri: URI): boolean {
+		const path = uri.path.toLowerCase();
+		if (path.endsWith('.tmlanguage.json')) {
+			return true;
+		}
+		if (path.endsWith('thirdpartynotices.txt')) {
+			return true;
+		}
+		if (path.includes('icon-theme.json') || path.endsWith('-icon-theme.json')) {
+			return true;
+		}
+		if (path.endsWith('.fixture.ts') || path.endsWith('.fixture.tsx')) {
+			return true;
+		}
+		return false;
 	}
 
 	private getByokLexicalSearchTerms(queryText: string): string[] {
@@ -340,7 +365,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 	private async collectByokTextSearchMatches(
 		pattern: string,
 		options: WorkspaceChunkSearchOptions,
-		candidateFiles: ResourceMap<void>,
+		candidateScores: ResourceMap<number>,
 		token: CancellationToken,
 	): Promise<void> {
 		const searchResult = this._searchService.findTextInFiles2(
@@ -356,11 +381,11 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		);
 
 		for await (const item of searchResult.results) {
-			if (token.isCancellationRequested || candidateFiles.size >= byokMaxCandidateFiles) {
+			if (token.isCancellationRequested) {
 				break;
 			}
-			if (item.uri && shouldInclude(item.uri, options.globPatterns ?? {})) {
-				candidateFiles.set(item.uri);
+			if (item.uri && shouldInclude(item.uri, options.globPatterns ?? {}) && !this.isExcludedByokSearchFile(item.uri)) {
+				candidateScores.set(item.uri, (candidateScores.get(item.uri) ?? 0) + 1);
 			}
 		}
 
@@ -573,7 +598,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		return coalesce(perFileChunks).flat();
 	}
 
-	private async getEmbeddingsForFiles(files: readonly URI[], include: GlobIncludeOptions, qos: EmbeddingsComputeQos, telemetry: { info: TelemetryCorrelationId; batchInfo?: ComputeBatchInfo }, token: CancellationToken, maxParallel = maxParallelEmbeddingOps): Promise<FileChunkWithEmbedding[]> {
+	private async getEmbeddingsForFiles(files: readonly URI[], include: GlobIncludeOptions, qos: EmbeddingsComputeQos, telemetry: { info: TelemetryCorrelationId; batchInfo?: ComputeBatchInfo }, token: CancellationToken, maxParallel = maxParallelEmbeddingOps, maxChunksPerFile?: number): Promise<FileChunkWithEmbedding[]> {
 		const batchInfo = telemetry.batchInfo ?? new ComputeBatchInfo();
 
 		return logExecTime(this._logService, 'workspaceChunkEmbeddingsIndex.getEmbeddingsForFiles', async () => {
@@ -598,7 +623,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 						return;
 					}
 
-					return raceCancellationError(this.getChunksAndEmbeddings(authToken, file, batchInfo, qos, telemetry.info.callTracker.add('WorkspaceChunkEmbeddingsIndex::getEmbeddingsForFiles'), token), token);
+					return raceCancellationError(this.getChunksAndEmbeddings(authToken, file, batchInfo, qos, telemetry.info.callTracker.add('WorkspaceChunkEmbeddingsIndex::getEmbeddingsForFiles'), token, maxChunksPerFile), token);
 				});
 			})), token);
 			return coalesce(chunksAndEmbeddings).flat();
@@ -632,7 +657,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 	/**
 	 * Get the chunks and embeddings for a file.
 	*/
-	private async getChunksAndEmbeddings(authToken: string, file: FileRepresentation, batchInfo: ComputeBatchInfo, qos: EmbeddingsComputeQos, telemetryInfo: CallTracker, token: CancellationToken): Promise<readonly FileChunkWithEmbedding[] | undefined> {
+	private async getChunksAndEmbeddings(authToken: string, file: FileRepresentation, batchInfo: ComputeBatchInfo, qos: EmbeddingsComputeQos, telemetryInfo: CallTracker, token: CancellationToken, maxChunksPerFile?: number): Promise<readonly FileChunkWithEmbedding[] | undefined> {
 		const cache = await this.getCache(token);
 		const existing = await raceCancellationError(cache.get(file), token);
 		if (existing) {
@@ -641,7 +666,17 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
 		const cachedChunks = cache.getCurrentChunksForUri(file.uri);
 		const chunksAndEmbeddings = await cache.update(file, async token => {
-			return this._chunkingEndpointClient.computeChunksAndEmbeddings(authToken, this._embeddingType, file, batchInfo, qos, cachedChunks, telemetryInfo, token);
+			return this._chunkingEndpointClient.computeChunksAndEmbeddings(
+				authToken,
+				this._embeddingType,
+				file,
+				batchInfo,
+				qos,
+				cachedChunks,
+				telemetryInfo,
+				token,
+				maxChunksPerFile !== undefined ? { maxChunks: maxChunksPerFile } : undefined,
+			);
 		});
 		this._onDidChangeWorkspaceIndexState.fire();
 		return chunksAndEmbeddings;
