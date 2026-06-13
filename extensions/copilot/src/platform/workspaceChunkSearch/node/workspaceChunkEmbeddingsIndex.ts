@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as l10n from '@vscode/l10n';
+import { createHash } from 'crypto';
 import { GlobIncludeOptions, shouldInclude } from '../../../util/common/glob';
 import { CallTracker, TelemetryCorrelationId } from '../../../util/common/telemetryCorrelationId';
 import { coalesce } from '../../../util/vs/base/common/arrays';
@@ -27,6 +28,7 @@ import { ILogService } from '../../log/common/logService';
 import { ISimulationTestContext } from '../../simulationTestContext/common/simulationTestContext';
 import { ISearchService } from '../../search/common/searchService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
+import { IWorkspaceService } from '../../workspace/common/workspaceService';
 import { ExcludeSettingOptions } from '../../../vscodeTypes';
 import { WorkspaceChunkSearchOptions } from '../common/workspaceChunkSearch';
 import { BYOK_CHUNKING_AUTH_TOKEN, isByokEmbeddingModelConfigured } from '../common/byokEmbeddingModel';
@@ -87,6 +89,13 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
 	private readonly _cacheRoot: URI | undefined;
 
+	/**
+	 * Whether {@link _cacheRoot} points at a cache shared across windows/processes
+	 * (the per-folder BYOK cache under global storage) rather than the per-window
+	 * workspace storage. Controls the SQLite open mode (WAL vs exclusive).
+	 */
+	private readonly _isSharedCache: boolean;
+
 	private _isDisposed = false;
 
 	constructor(
@@ -101,10 +110,13 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		@IWorkspaceFileIndex private readonly _workspaceIndex: IWorkspaceFileIndex,
 		@IChunkingEndpointClient private readonly _chunkingEndpointClient: IChunkingEndpointClient,
 		@ISearchService private readonly _searchService: ISearchService,
+		@IWorkspaceService private readonly _workspaceService: IWorkspaceService,
 	) {
 		super();
 
-		this._cacheRoot = vsExtensionContext.storageUri;
+		const cache = this.resolveCacheRoot(vsExtensionContext);
+		this._cacheRoot = cache.root;
+		this._isSharedCache = cache.shared;
 
 		this._register(Event.any(
 			this._workspaceIndex.onDidChangeFiles,
@@ -113,6 +125,32 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		)(() => {
 			this._onDidChangeWorkspaceIndexState.fire();
 		}));
+	}
+
+	/**
+	 * Resolves where the BYOK embedding cache lives.
+	 *
+	 * To keep behaviour aligned between the main window and the Agents window we
+	 * key the cache by the workspace folder set under the (profile-shared) global
+	 * storage, rather than the per-window workspace storage. That way both windows
+	 * opening the same project reuse one warm `workspace-chunks.db` instead of each
+	 * rebuilding embeddings from scratch.
+	 *
+	 * Falls back to the per-window workspace storage when there are no stable
+	 * workspace folders or no on-disk global storage.
+	 */
+	private resolveCacheRoot(vsExtensionContext: IVSCodeExtensionContext): { readonly root: URI | undefined; readonly shared: boolean } {
+		const folders = this._workspaceService.getWorkspaceFolders();
+		const globalStorage = vsExtensionContext.globalStorageUri;
+		if (!folders.length || globalStorage?.scheme !== Schemas.file) {
+			return { root: vsExtensionContext.storageUri, shared: false };
+		}
+
+		const folderKey = createHash('sha256')
+			.update(folders.map(folder => folder.toString()).sort().join('\n').toLowerCase())
+			.digest('hex')
+			.slice(0, 32);
+		return { root: URI.joinPath(globalStorage, 'byokWorkspaceChunks', folderKey), shared: true };
 	}
 
 	override dispose(): void {
@@ -144,6 +182,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 				this._cacheRoot,
 				this._workspaceIndex,
 				CancellationToken.None,
+				this._isSharedCache,
 			));
 
 		if (this._isDisposed) {
@@ -154,7 +193,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		const cacheLocation = this._cacheRoot?.scheme === Schemas.file
 			? URI.joinPath(this._cacheRoot, 'workspace-chunks.db').fsPath
 			: ':memory:';
-		this._logService.info(`WorkspaceChunkEmbeddingsIndex: opened embedding cache (${cacheLocation})`);
+		this._logService.info(`WorkspaceChunkEmbeddingsIndex: opened embedding cache (${cacheLocation}, shared=${this._isSharedCache})`);
 
 		this._onDidChangeWorkspaceIndexState.fire();
 		return this._register(cache);

@@ -66,9 +66,17 @@ export async function createWorkspaceChunkAndEmbeddingCache(
 	cacheRoot: URI | undefined,
 	workspaceIndex: IWorkspaceFileIndex,
 	token: CancellationToken,
+	/**
+	 * When true the database is opened in a way that is safe to share between
+	 * multiple processes (e.g. the main window and the Agents window pointing at
+	 * the same shared BYOK cache). This trades the fast single-process PRAGMAs
+	 * for WAL journaling + a busy timeout so concurrent readers/writers do not
+	 * fail with SQLITE_BUSY.
+	 */
+	multiProcess: boolean = false,
 ): Promise<IWorkspaceChunkAndEmbeddingCache> {
 	const instantiationService = accessor.get(IInstantiationService);
-	return instantiationService.invokeFunction(accessor => DbCache.create(accessor, embeddingType, cacheRoot ?? ':memory:', workspaceIndex, token));
+	return instantiationService.invokeFunction(accessor => DbCache.create(accessor, embeddingType, cacheRoot ?? ':memory:', workspaceIndex, token, multiProcess));
 }
 
 class OldDiskCache {
@@ -99,6 +107,7 @@ class DbCache implements IWorkspaceChunkAndEmbeddingCache {
 		cacheRoot: URI | ':memory:',
 		workspaceIndex: IWorkspaceFileIndex,
 		token: CancellationToken,
+		multiProcess: boolean = false,
 	): Promise<DbCache> {
 		const instantiationService = accessor.get(IInstantiationService);
 		const logService = accessor.get(ILogService);
@@ -129,13 +138,25 @@ class DbCache implements IWorkspaceChunkAndEmbeddingCache {
 		}
 
 		try {
-			db.exec(`
-			PRAGMA journal_mode = OFF;
-			PRAGMA synchronous = 0;
-			PRAGMA cache_size = 10000;
-			PRAGMA locking_mode = EXCLUSIVE;
-			PRAGMA temp_store = MEMORY;
-		`);
+			if (multiProcess) {
+				// WAL + a busy timeout let multiple processes (windows) safely read
+				// and write the same shared cache file without SQLITE_BUSY failures.
+				db.exec(`
+				PRAGMA journal_mode = WAL;
+				PRAGMA synchronous = NORMAL;
+				PRAGMA busy_timeout = 5000;
+				PRAGMA cache_size = 10000;
+				PRAGMA temp_store = MEMORY;
+			`);
+			} else {
+				db.exec(`
+				PRAGMA journal_mode = OFF;
+				PRAGMA synchronous = 0;
+				PRAGMA cache_size = 10000;
+				PRAGMA locking_mode = EXCLUSIVE;
+				PRAGMA temp_store = MEMORY;
+			`);
+			}
 
 			db.exec(`
 				CREATE TABLE IF NOT EXISTS CacheMeta (
