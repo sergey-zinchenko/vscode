@@ -28,6 +28,7 @@ import { IKeybindingService } from '../../../../../platform/keybinding/common/ke
 import { IHostService } from '../../../../../workbench/services/host/browser/host.js';
 import { IMarkdownRendererService } from '../../../../../platform/markdown/browser/markdownRenderer.js';
 import { ChatEntitlement, IChatEntitlementService, IChatSentiment } from '../../../../../workbench/services/chat/common/chatEntitlementService.js';
+import { IExtensionService } from '../../../../../workbench/services/extensions/common/extensions.js';
 import { WELCOME_COMPLETE_KEY } from '../../../../common/welcome.js';
 import { SessionsSetUpService } from '../../../../browser/sessionsSetUpService.js';
 
@@ -118,6 +119,7 @@ async function createService(
 		render: () => ({ element: document.createElement('span'), dispose: () => { } }),
 	} as unknown as IMarkdownRendererService);
 	instantiationService.stub(IDefaultAccountService, defaultAccountService);
+	instantiationService.stub(IExtensionService, { whenInstalledExtensionsRegistered: () => Promise.resolve(true) } as unknown as IExtensionService);
 
 	const service = disposables.add(instantiationService.createInstance(SessionsSetUpService));
 	await (service as unknown as { _initPromise: Promise<void> })._initPromise;
@@ -158,6 +160,17 @@ suite('SessionsSetUpService', () => {
 	test('whenWelcomeDone completes for BYOK without Copilot account', async () => {
 		const { service } = await createService(disposables, {
 			hasByokModels: true,
+			welcomeComplete: true,
+			defaultAccount: null,
+			withChatAgent: true,
+		});
+
+		await service.whenWelcomeDone();
+	});
+
+	test('whenWelcomeDone completes when welcome already complete without BYOK context', async () => {
+		const { service } = await createService(disposables, {
+			hasByokModels: false,
 			welcomeComplete: true,
 			defaultAccount: null,
 			withChatAgent: true,

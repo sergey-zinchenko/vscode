@@ -12,7 +12,8 @@ import { IStorageService, StorageScope, StorageTarget } from '../../platform/sto
 import { IUserDataProfileStorageService } from '../../platform/userDataProfile/common/userDataProfileStorageService.js';
 import { IUserDataProfilesService } from '../../platform/userDataProfile/common/userDataProfile.js';
 import { ServiceCollection } from '../../platform/instantiation/common/serviceCollection.js';
-import { ChatEntitlementContext, IChatEntitlementService } from '../../workbench/services/chat/common/chatEntitlementService.js';
+import { ChatEntitlementContext, ChatEntitlementContextKeys, IChatEntitlementService } from '../../workbench/services/chat/common/chatEntitlementService.js';
+import { IExtensionService } from '../../workbench/services/extensions/common/extensions.js';
 import { isWeb } from '../../base/common/platform.js';
 import { GitHubPaths, IDefaultAccountService } from '../../platform/defaultAccount/common/defaultAccount.js';
 import { IProductService } from '../../platform/product/common/productService.js';
@@ -36,6 +37,11 @@ import { MarkdownString } from '../../base/common/htmlContent.js';
 import { localize } from '../../nls.js';
 
 const AIDisabledConfig = 'chat.disableAIFeatures';
+
+/** Must stay in sync with HasByokModelsContribution.STORAGE_KEY_LAST_KNOWN */
+const hasByokModelsLastKnownKey = 'chat.hasByokModels.lastKnown';
+
+const byokModelContextKeys = new Set([ChatEntitlementContextKeys.hasByokModels.key]);
 
 export const ISessionsSetUpService = createDecorator<ISessionsSetUpService>('sessionsSetUpService');
 
@@ -89,19 +95,37 @@ class SessionsSetUpWidget extends Disposable {
 		@IHostService private readonly hostService: IHostService,
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
 		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
+		@IExtensionService private readonly extensionService: IExtensionService,
 	) {
 		super();
 		this._start();
 	}
 
 	private shouldBypassWelcomeForByok(): boolean {
-		return this.chatEntitlementService.hasByokModels;
+		if (this.chatEntitlementService.hasByokModels) {
+			return true;
+		}
+		// Main window may have already discovered BYOK models and persisted the answer
+		// before this window's context key is updated (e.g. extension-provided DIAL models).
+		return this.storageService.getBoolean(hasByokModelsLastKnownKey, StorageScope.APPLICATION, false);
 	}
 
-	private async waitForByokModels(maxWaitMs = 2000): Promise<boolean> {
+	/**
+	 * Resolves true if BYOK models are (or become) available, so we can skip the
+	 * GitHub sign-in dialog. On first launch the BYOK provider extension (e.g. a
+	 * custom model provider) still needs to activate and register its models, so
+	 * we cannot rely on a short fixed timeout. Instead we resolve as soon as the
+	 * `github.copilot.hasByokModels` context key flips on, and only fall back to
+	 * sign-in once extensions have finished registering (plus a short grace for
+	 * provider activation), with a generous absolute upper bound as a safety net.
+	 */
+	private async waitForByokModels(): Promise<boolean> {
 		if (this.shouldBypassWelcomeForByok()) {
 			return true;
 		}
+
+		const postRegistrationGraceMs = 2500;
+		const absoluteMaxWaitMs = 20000;
 
 		return new Promise<boolean>(resolve => {
 			const store = new DisposableStore();
@@ -115,12 +139,29 @@ class SessionsSetUpWidget extends Disposable {
 				store.dispose();
 				resolve(result);
 			};
-			store.add(this.chatEntitlementService.onDidChangeEntitlement(() => {
+			const checkNow = () => {
 				if (this.shouldBypassWelcomeForByok()) {
 					done(true);
 				}
+			};
+			// Resolve immediately when the BYOK context key flips on or persisted state updates.
+			store.add(this.contextKeyService.onDidChangeContext(e => {
+				if (e.affectsSome(byokModelContextKeys)) {
+					checkNow();
+				}
 			}));
-			store.add(disposableTimeout(() => done(this.shouldBypassWelcomeForByok()), maxWaitMs));
+			store.add(this.storageService.onDidChangeValue(StorageScope.APPLICATION, hasByokModelsLastKnownKey, store)(() => checkNow()));
+			store.add(this.chatEntitlementService.onDidChangeEntitlement(checkNow));
+			// Give provider extensions time to activate and register their models before
+			// we decide sign-in is required. Only resolve positively here — negative
+			// resolution waits for the absolute timeout so we don't give up too early.
+			this.extensionService.whenInstalledExtensionsRegistered().then(() => {
+				if (!store.isDisposed) {
+					checkNow();
+					store.add(disposableTimeout(checkNow, postRegistrationGraceMs));
+				}
+			});
+			store.add(disposableTimeout(() => done(this.shouldBypassWelcomeForByok()), absoluteMaxWaitMs));
 		});
 	}
 
@@ -199,6 +240,15 @@ class SessionsSetUpWidget extends Disposable {
 			return;
 		}
 		if (!initialAccount) {
+			// Welcome was already completed (e.g. prior BYOK bypass). Don't block the
+			// Agents window with a Copilot sign-in dialog on every subsequent launch.
+			if (this.storageService.getBoolean(WELCOME_COMPLETE_KEY, StorageScope.APPLICATION, false)) {
+				this.logService.info('[sessions welcome] Welcome already complete without Copilot account, skipping sign-in');
+				await this._ensureAIFeaturesEnabled();
+				this.onCompleted();
+				this.watcherRef.value = this._watchActiveState(false);
+				return;
+			}
 			if (await this.waitForByokModels() && this.shouldBypassWelcomeForByok()) {
 				await this.completeByokBypass();
 				return;
@@ -307,10 +357,14 @@ class SessionsSetUpWidget extends Disposable {
 				return;
 			}
 
-			overlay.element.classList.add('sessions-loading-dismissed');
-			this.dialogRef.value.add(disposableTimeout(() => overlay.element.remove(), 200));
+			const dismissOverlay = () => {
+				overlay.element.classList.add('sessions-loading-dismissed');
+				this.dialogRef.value?.add(disposableTimeout(() => overlay.element.remove(), 200));
+			};
 
 			if (account) {
+				dismissOverlay();
+
 				const setupDone = await this.serviceWhenSetupDone();
 				if (this._store.isDisposed) {
 					return;
@@ -325,11 +379,14 @@ class SessionsSetUpWidget extends Disposable {
 
 				await this._showWelcomeDialog();
 			} else {
+				// Keep the loading overlay visible while we wait for BYOK provider
+				// extensions to register their models before falling back to sign-in.
 				if (await this.waitForByokModels() && this.shouldBypassWelcomeForByok()) {
 					this.dialogRef.clear();
 					await this.completeByokBypass();
 					return;
 				}
+				dismissOverlay();
 				await this._showSignInDialog();
 			}
 		} else {
