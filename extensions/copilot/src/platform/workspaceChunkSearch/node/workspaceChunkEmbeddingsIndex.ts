@@ -11,7 +11,7 @@ import { CancellationToken, CancellationTokenSource } from '../../../util/vs/bas
 import { CancellationError } from '../../../util/vs/base/common/errors';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
-import { ResourceMap } from '../../../util/vs/base/common/map';
+import { ResourceMap, ResourceSet } from '../../../util/vs/base/common/map';
 import { Schemas } from '../../../util/vs/base/common/network';
 import { extname } from '../../../util/vs/base/common/resources';
 import { URI } from '../../../util/vs/base/common/uri';
@@ -59,6 +59,24 @@ const byokMaxParallelEmbeddingOps = 3;
 
 /** Max text-search matches collected per lexical query term. */
 const byokMaxTextSearchMatchesPerTerm = 150;
+
+/** Higher cap for longer/specific query terms so matches are less likely to be cut off. */
+const byokMaxTextSearchMatchesPerSpecificTerm = 400;
+
+/** Query tokens at or above this length are treated as specific (shorter tokens are high-frequency). */
+const byokSpecificLexicalTermMinLength = 8;
+
+/** Strict lexical filter: >=2 matched terms with at least one specific term. */
+const byokMinMatchedLexicalTerms = 2;
+const byokMinSpecificLexicalTerms = 1;
+
+/** Non-source file extensions deprioritized in lexical pre-filter (extension-only, stack-agnostic). */
+const byokLexicalDocumentationExtensions = new Set([
+	'.adoc', '.md', '.markdown', '.rst', '.txt',
+]);
+const byokLexicalConfigurationExtensions = new Set([
+	'.cfg', '.conf', '.csv', '.ini', '.json', '.toml', '.xml', '.yaml', '.yml',
+]);
 
 export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
@@ -414,20 +432,89 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		token: CancellationToken,
 	): Promise<URI[]> {
 		const candidateScores = new ResourceMap<number>();
+		const candidateMatchedTerms = new ResourceMap<Set<string>>();
 		const searchTerms = this.getByokLexicalSearchTerms(queryText);
 
-		for (const term of searchTerms) {
+		for (const term of this.orderByokLexicalSearchTerms(searchTerms)) {
 			if (token.isCancellationRequested) {
 				break;
 			}
-			await this.collectByokTextSearchMatches(term, options, candidateScores, token);
+			const termWeight = this.getByokLexicalTermWeight(term);
+			await this.collectByokTextSearchMatches(term, termWeight, options, candidateScores, candidateMatchedTerms, token);
 		}
 
-		return Array.from(candidateScores.entries())
+		this.applyByokLexicalPathBoost(candidateScores, searchTerms);
+
+		const sorted = Array.from(candidateScores.entries())
 			.filter(([uri]) => shouldInclude(uri, options.globPatterns ?? {}) && !this.isExcludedByokSearchFile(uri))
-			.sort((a, b) => b[1] - a[1])
-			.slice(0, byokMaxCandidateFiles)
-			.map(([uri]) => uri);
+			.sort((a, b) => this.compareByokLexicalCandidates(a, b, candidateMatchedTerms));
+
+		const ranked = this.selectByokLexicalCandidates(sorted, candidateMatchedTerms);
+
+		return ranked.map(([uri]) => uri);
+	}
+
+	private selectByokLexicalCandidates(
+		sorted: [URI, number][],
+		candidateMatchedTerms: ResourceMap<Set<string>>,
+	): [URI, number][] {
+		const selected: [URI, number][] = [];
+		const selectedUris = new ResourceSet();
+
+		const tryAdd = (
+			predicate: (matchedTerms: Set<string> | undefined) => boolean,
+			excludeLowPriority: boolean,
+		) => {
+			for (const entry of sorted) {
+				if (selected.length >= byokMaxCandidateFiles) {
+					break;
+				}
+				if (selectedUris.has(entry[0])) {
+					continue;
+				}
+				if (excludeLowPriority && this.isLowPriorityByokLexicalFile(entry[0])) {
+					continue;
+				}
+				if (!predicate(candidateMatchedTerms.get(entry[0]))) {
+					continue;
+				}
+				selected.push(entry);
+				selectedUris.add(entry[0]);
+			}
+		};
+
+		tryAdd(
+			matched => (matched?.size ?? 0) >= byokMinMatchedLexicalTerms
+				&& this.getByokSpecificTermMatchCount(matched) >= byokMinSpecificLexicalTerms,
+			true,
+		);
+		if (selected.length < byokMaxCandidateFiles) {
+			this._logService.info(
+				`WorkspaceChunkEmbeddingsIndex: BYOK lexical pre-filter found ${selected.length} file(s) with ` +
+				`>=${byokMinMatchedLexicalTerms} term(s) including >=${byokMinSpecificLexicalTerms} specific; relaxing to specific-only`,
+			);
+			tryAdd(
+				matched => this.getByokSpecificTermMatchCount(matched) >= byokMinSpecificLexicalTerms,
+				true,
+			);
+		}
+		if (selected.length < byokMaxCandidateFiles) {
+			tryAdd(matched => (matched?.size ?? 0) >= byokMinMatchedLexicalTerms, true);
+		}
+		if (selected.length < byokMaxCandidateFiles) {
+			for (const entry of sorted) {
+				if (selected.length >= byokMaxCandidateFiles) {
+					break;
+				}
+				if (selectedUris.has(entry[0]) || this.isLowPriorityByokLexicalFile(entry[0])) {
+					continue;
+				}
+				selected.push(entry);
+				selectedUris.add(entry[0]);
+			}
+		}
+
+		return selected;
 	}
 
 	private isExcludedByokSearchFile(uri: URI): boolean {
@@ -441,18 +528,25 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		if (path.includes('icon-theme.json') || path.endsWith('-icon-theme.json')) {
 			return true;
 		}
-		if (path.endsWith('.fixture.ts') || path.endsWith('.fixture.tsx')) {
+		if (path.includes('.fixture.')) {
+			return true;
+		}
+		// BYOK search implementation matches its own query-term constants in source.
+		if (path.includes('/workspacechunksearch/')) {
 			return true;
 		}
 		return false;
 	}
 
+	private orderByokLexicalSearchTerms(searchTerms: readonly string[]): string[] {
+		const specificTerms = searchTerms.filter(term => this.isByokSpecificLexicalTerm(term)).sort();
+		const commonTerms = searchTerms.filter(term => !this.isByokSpecificLexicalTerm(term)).sort();
+		return [...specificTerms, ...commonTerms];
+	}
+
 	private getByokLexicalSearchTerms(queryText: string): string[] {
 		const trimmed = queryText.trim();
 		const terms = new Set<string>();
-		if (trimmed.length > 0) {
-			terms.add(trimmed);
-		}
 
 		for (const word of trimmed.split(/\s+/)) {
 			const normalized = word.replace(/[^\p{L}\p{N}_-]/gu, '').toLowerCase();
@@ -461,21 +555,146 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			}
 		}
 
-		return Array.from(terms);
+		// Sorted for stable term processing order across runs.
+		return Array.from(terms).sort();
+	}
+
+	/** Longer tokens are usually more specific in natural-language queries. */
+	private getByokLexicalTermWeight(term: string): number {
+		return Math.max(1, Math.min(4, Math.ceil(term.length / 2)));
+	}
+
+	private applyByokLexicalPathBoost(candidateScores: ResourceMap<number>, searchTerms: readonly string[]): void {
+		for (const [uri, score] of candidateScores) {
+			const pathLower = uri.fsPath.toLowerCase();
+			let boost = 0;
+			for (const term of searchTerms) {
+				if (!this.isByokSpecificLexicalTerm(term)) {
+					continue;
+				}
+				if (pathLower.includes(term)) {
+					boost += 2;
+				}
+			}
+			if (boost > 0) {
+				candidateScores.set(uri, score + boost);
+			}
+		}
+	}
+
+	private isByokSpecificLexicalTerm(term: string): boolean {
+		return term.length >= byokSpecificLexicalTermMinLength;
+	}
+
+	private getByokSpecificTermMatchCount(matchedTerms: Set<string> | undefined): number {
+		if (!matchedTerms) {
+			return 0;
+		}
+		let count = 0;
+		for (const term of matchedTerms) {
+			if (this.isByokSpecificLexicalTerm(term)) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private isLowPriorityByokLexicalFile(uri: URI): boolean {
+		const category = this.getByokLexicalFileCategory(uri);
+		return category === 'documentation' || category === 'configuration';
+	}
+
+	private getByokLexicalFileCategory(uri: URI): 'configuration' | 'documentation' | 'source' {
+		const extension = extname(uri).toLowerCase();
+		if (byokLexicalDocumentationExtensions.has(extension)) {
+			return 'documentation';
+		}
+		if (byokLexicalConfigurationExtensions.has(extension)) {
+			return 'configuration';
+		}
+		return 'source';
+	}
+
+	private getByokPathMatchedTermCount(uri: URI, matchedTerms: Set<string> | undefined): number {
+		if (!matchedTerms) {
+			return 0;
+		}
+		const pathLower = uri.fsPath.toLowerCase();
+		let count = 0;
+		for (const term of matchedTerms) {
+			if (pathLower.includes(term)) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private compareByokLexicalCandidates(
+		a: [URI, number],
+		b: [URI, number],
+		candidateMatchedTerms: ResourceMap<Set<string>>,
+	): number {
+		const aMatched = candidateMatchedTerms.get(a[0]);
+		const bMatched = candidateMatchedTerms.get(b[0]);
+		const aSpecific = this.getByokSpecificTermMatchCount(aMatched);
+		const bSpecific = this.getByokSpecificTermMatchCount(bMatched);
+		if (bSpecific !== aSpecific) {
+			return bSpecific - aSpecific;
+		}
+
+		const aTotal = aMatched?.size ?? 0;
+		const bTotal = bMatched?.size ?? 0;
+		if (bTotal !== aTotal) {
+			return bTotal - aTotal;
+		}
+
+		const pathTermDiff = this.getByokPathMatchedTermCount(b[0], bMatched) - this.getByokPathMatchedTermCount(a[0], aMatched);
+		if (pathTermDiff !== 0) {
+			return pathTermDiff;
+		}
+
+		if (b[1] !== a[1]) {
+			return b[1] - a[1];
+		}
+		const pathPriorityDiff = this.getByokLexicalPathPriority(b[0]) - this.getByokLexicalPathPriority(a[0]);
+		if (pathPriorityDiff !== 0) {
+			return pathPriorityDiff;
+		}
+		return a[0].fsPath.localeCompare(b[0].fsPath);
+	}
+
+	private getByokLexicalPathPriority(uri: URI): number {
+		const category = this.getByokLexicalFileCategory(uri);
+		if (category === 'documentation' || category === 'configuration') {
+			return -1;
+		}
+		const path = uri.path.toLowerCase();
+		const baseName = path.slice(path.lastIndexOf('/') + 1);
+		if (path.includes('/test/') || path.includes('/tests/') || path.includes('__tests__')
+			|| baseName.includes('.test.') || baseName.includes('.spec.')) {
+			return 1;
+		}
+		return 2;
 	}
 
 	private async collectByokTextSearchMatches(
-		pattern: string,
+		term: string,
+		termWeight: number,
 		options: WorkspaceChunkSearchOptions,
 		candidateScores: ResourceMap<number>,
+		candidateMatchedTerms: ResourceMap<Set<string>>,
 		token: CancellationToken,
 	): Promise<void> {
+		const matchedFilesThisTerm = new ResourceSet();
+		const maxResults = this.isByokSpecificLexicalTerm(term)
+			? byokMaxTextSearchMatchesPerSpecificTerm
+			: byokMaxTextSearchMatchesPerTerm;
 		const searchResult = this._searchService.findTextInFiles2(
-			{ pattern, isRegExp: false },
+			{ pattern: term, isRegExp: false },
 			{
 				include: options.globPatterns?.include,
 				exclude: options.globPatterns?.exclude,
-				maxResults: byokMaxTextSearchMatchesPerTerm,
+				maxResults,
 				useExcludeSettings: ExcludeSettingOptions.SearchAndFilesExclude,
 				caseInsensitive: true,
 			},
@@ -486,9 +705,21 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			if (token.isCancellationRequested) {
 				break;
 			}
-			if (item.uri && shouldInclude(item.uri, options.globPatterns ?? {}) && !this.isExcludedByokSearchFile(item.uri)) {
-				candidateScores.set(item.uri, (candidateScores.get(item.uri) ?? 0) + 1);
+			if (!item.uri || !shouldInclude(item.uri, options.globPatterns ?? {}) || this.isExcludedByokSearchFile(item.uri)) {
+				continue;
 			}
+			if (matchedFilesThisTerm.has(item.uri)) {
+				continue;
+			}
+			matchedFilesThisTerm.add(item.uri);
+			candidateScores.set(item.uri, (candidateScores.get(item.uri) ?? 0) + termWeight);
+
+			let matchedTerms = candidateMatchedTerms.get(item.uri);
+			if (!matchedTerms) {
+				matchedTerms = new Set<string>();
+				candidateMatchedTerms.set(item.uri, matchedTerms);
+			}
+			matchedTerms.add(term);
 		}
 
 		await raceCancellationError(searchResult.complete, token);
@@ -789,11 +1020,11 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		const cache = await this.getCache(token);
 		const existing = await raceCancellationError(cache.get(file), token);
 		if (existing) {
-			this._logService.trace(`WorkspaceChunkEmbeddingsIndex: cache hit for ${file.uri.fsPath} (${existing.length} chunk(s))`);
+			this._logService.trace(`WorkspaceChunkEmbeddingsIndex: cache hit (${existing.length} chunk(s))`);
 			return existing;
 		}
 
-		this._logService.trace(`WorkspaceChunkEmbeddingsIndex: cache miss for ${file.uri.fsPath}, computing embeddings`);
+		this._logService.trace(`WorkspaceChunkEmbeddingsIndex: cache miss, computing embeddings`);
 		const cachedChunks = cache.getCurrentChunksForUri(file.uri);
 		const chunksAndEmbeddings = await cache.update(file, async token => {
 			return this._chunkingEndpointClient.computeChunksAndEmbeddings(
