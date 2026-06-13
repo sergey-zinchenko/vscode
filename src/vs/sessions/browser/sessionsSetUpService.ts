@@ -88,9 +88,49 @@ class SessionsSetUpWidget extends Disposable {
 		@IKeybindingService private readonly keybindingService: IKeybindingService,
 		@IHostService private readonly hostService: IHostService,
 		@IMarkdownRendererService private readonly markdownRendererService: IMarkdownRendererService,
+		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
 	) {
 		super();
 		this._start();
+	}
+
+	private shouldBypassWelcomeForByok(): boolean {
+		return this.chatEntitlementService.hasByokModels;
+	}
+
+	private async waitForByokModels(maxWaitMs = 2000): Promise<boolean> {
+		if (this.shouldBypassWelcomeForByok()) {
+			return true;
+		}
+
+		return new Promise<boolean>(resolve => {
+			const store = new DisposableStore();
+			this._register(store);
+			let settled = false;
+			const done = (result: boolean) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				store.dispose();
+				resolve(result);
+			};
+			store.add(this.chatEntitlementService.onDidChangeEntitlement(() => {
+				if (this.shouldBypassWelcomeForByok()) {
+					done(true);
+				}
+			}));
+			store.add(disposableTimeout(() => done(this.shouldBypassWelcomeForByok()), maxWaitMs));
+		});
+	}
+
+	private async completeByokBypass(): Promise<void> {
+		this.logService.info('[sessions welcome] BYOK models available, skipping sign-in');
+		this.storageService.store(WELCOME_COMPLETE_KEY, true, StorageScope.APPLICATION, StorageTarget.MACHINE);
+		this.dialogRef.clear();
+		await this._ensureAIFeaturesEnabled();
+		this.onCompleted();
+		this.watcherRef.value = this._watchActiveState(false);
 	}
 
 	private _start(): void {
@@ -159,6 +199,10 @@ class SessionsSetUpWidget extends Disposable {
 			return;
 		}
 		if (!initialAccount) {
+			if (await this.waitForByokModels() && this.shouldBypassWelcomeForByok()) {
+				await this.completeByokBypass();
+				return;
+			}
 			this._showWelcome(false);
 			return;
 		}
@@ -173,8 +217,10 @@ class SessionsSetUpWidget extends Disposable {
 		disposables.add(this.defaultAccountService.onDidChangeDefaultAccount(account => {
 			const nowSignedIn = account !== null;
 			if (signedIn && !nowSignedIn) {
-				this.storageService.remove(WELCOME_COMPLETE_KEY, StorageScope.APPLICATION);
-				this._showWelcome(false);
+				if (!this.shouldBypassWelcomeForByok()) {
+					this.storageService.remove(WELCOME_COMPLETE_KEY, StorageScope.APPLICATION);
+					this._showWelcome(false);
+				}
 			}
 			signedIn = nowSignedIn;
 		}));
@@ -279,9 +325,19 @@ class SessionsSetUpWidget extends Disposable {
 
 				await this._showWelcomeDialog();
 			} else {
+				if (await this.waitForByokModels() && this.shouldBypassWelcomeForByok()) {
+					this.dialogRef.clear();
+					await this.completeByokBypass();
+					return;
+				}
 				await this._showSignInDialog();
 			}
 		} else {
+			if (await this.waitForByokModels() && this.shouldBypassWelcomeForByok()) {
+				this.dialogRef.clear();
+				await this.completeByokBypass();
+				return;
+			}
 			await this._showSignInDialog();
 		}
 
@@ -423,7 +479,8 @@ export class SessionsSetUpService extends Disposable implements ISessionsSetUpSe
 
 	private async whenSetupDone(): Promise<boolean> {
 		await this._initPromise;
-		return this.chatEntitlementService.sentiment.completed === true;
+		return this.chatEntitlementService.sentiment.completed === true
+			|| this.chatEntitlementService.hasByokModels;
 	}
 
 	private markDone(): void {
