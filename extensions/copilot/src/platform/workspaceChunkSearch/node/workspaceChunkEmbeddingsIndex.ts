@@ -334,9 +334,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			}
 
 			const results = this.rankEmbeddings(queryEmbedding, searchEmbeddings, maxResults);
-			this._logService.info(
-				`WorkspaceChunkEmbeddingsIndex: BYOK search returned ${results.length} result chunk(s) (maxResults=${maxResults})`,
-			);
+			this.logByokResultSourceMetrics(candidateFiles, searchEmbeddings, results);
 			return results;
 		}, (execTime, status) => {
 			this._telemetryService.sendMSFTTelemetryEvent('workspaceChunkEmbeddingsIndex.perf.searchByokWorkspace', {
@@ -358,6 +356,56 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			chunk => !lexicalFileUris.has(chunk.chunk.file.toString()),
 		);
 		return [...cachedOutsideLexical, ...lexicalEmbeddings];
+	}
+
+	/**
+	 * Logs how much of the rank pool and final results came from lexical keyword candidates
+	 * vs the broader cached embedding pool (semantic-only discovery outside ripgrep pre-filter).
+	 */
+	private logByokResultSourceMetrics(
+		lexicalCandidateFiles: readonly URI[],
+		searchEmbeddings: readonly FileChunkWithEmbedding[],
+		results: readonly FileChunkAndScore[],
+	): void {
+		const lexicalFileUris = new Set(lexicalCandidateFiles.map(uri => uri.toString()));
+
+		const poolFromCached = searchEmbeddings.filter(
+			chunk => !lexicalFileUris.has(chunk.chunk.file.toString()),
+		).length;
+		const poolFromLexical = searchEmbeddings.length - poolFromCached;
+		const poolCachedPct = searchEmbeddings.length > 0
+			? Math.round((poolFromCached / searchEmbeddings.length) * 100)
+			: 0;
+
+		const resultsFromCached = results.filter(
+			r => !lexicalFileUris.has(r.chunk.file.toString()),
+		);
+		const resultsFromLexical = results.length - resultsFromCached.length;
+		const resultCachedPct = results.length > 0
+			? Math.round((resultsFromCached.length / results.length) * 100)
+			: 0;
+		const resultLexicalPct = results.length > 0 ? 100 - resultCachedPct : 0;
+
+		const resultCachedFiles = new Set(resultsFromCached.map(r => r.chunk.file.toString())).size;
+		const resultLexicalFiles = new Set(
+			results.filter(r => lexicalFileUris.has(r.chunk.file.toString())).map(r => r.chunk.file.toString()),
+		).size;
+
+		this._logService.info(
+			`WorkspaceChunkEmbeddingsIndex: BYOK search returned ${results.length} result chunk(s) ` +
+			`(${resultsFromLexical} lexical / ${resultsFromCached.length} cached-pool)`,
+		);
+		this._logService.info(
+			`WorkspaceChunkEmbeddingsIndex: BYOK result source: ${resultLexicalPct}% (${resultsFromLexical}/${results.length} chunks, ` +
+			`${resultLexicalFiles} file(s)) from lexical keyword candidates, ` +
+			`${resultCachedPct}% (${resultsFromCached.length}/${results.length} chunks, ${resultCachedFiles} file(s)) ` +
+			`from cached embedding pool outside lexical pre-filter`,
+		);
+		this._logService.info(
+			`WorkspaceChunkEmbeddingsIndex: BYOK rank pool source: ${100 - poolCachedPct}% (${poolFromLexical}/${searchEmbeddings.length} chunks) lexical, ` +
+			`${poolCachedPct}% (${poolFromCached}/${searchEmbeddings.length} chunks) cached pool — ` +
+			`embedding pool result lift: ${resultCachedPct - poolCachedPct >= 0 ? '+' : ''}${resultCachedPct - poolCachedPct}pp vs pool share`,
+		);
 	}
 
 	private async findByokCandidateFiles(
