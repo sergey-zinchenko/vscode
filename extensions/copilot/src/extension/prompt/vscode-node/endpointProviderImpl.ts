@@ -349,14 +349,12 @@ export class ProductionEndpointProvider extends Disposable implements IEndpointP
 			return undefined;
 		}
 
-		// Verify the model is actually registered. vscode.lm.embeddingModels
-		// returns the list of all registered embedding model IDs.
+		// Prefer the configured override even if the provider extension is still
+		// starting or briefly re-registering — computeEmbeddings resolves at call time.
 		try {
 			const registeredModels = lm.embeddingModels;
 			if (!registeredModels.includes(raw)) {
-				this._logService.warn(`[ProductionEndpointProvider] ${ProductionEndpointProvider.EMBEDDING_MODEL_CONFIG_KEY} override '${raw}' is not registered; falling back to default.`);
-				this._notifyEmbeddingModelUnavailable(raw);
-				return undefined;
+				this._logService.trace(`[ProductionEndpointProvider] ${ProductionEndpointProvider.EMBEDDING_MODEL_CONFIG_KEY} override '${raw}' is not registered yet; will delegate at compute time.`);
 			}
 		} catch {
 			// embeddingModels is a proposed API; if it throws, fall through

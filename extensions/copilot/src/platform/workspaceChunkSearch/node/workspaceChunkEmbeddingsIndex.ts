@@ -10,13 +10,13 @@ import { Limiter, raceCancellationError, raceTimeout } from '../../../util/vs/ba
 import { CancellationToken, CancellationTokenSource } from '../../../util/vs/base/common/cancellation';
 import { CancellationError } from '../../../util/vs/base/common/errors';
 import { Emitter, Event } from '../../../util/vs/base/common/event';
-import { Lazy } from '../../../util/vs/base/common/lazy';
 import { Disposable } from '../../../util/vs/base/common/lifecycle';
 import { ResourceMap } from '../../../util/vs/base/common/map';
 import { extname } from '../../../util/vs/base/common/resources';
 import { URI } from '../../../util/vs/base/common/uri';
 import { IInstantiationService } from '../../../util/vs/platform/instantiation/common/instantiation';
 import { IAuthenticationService } from '../../authentication/common/authentication';
+import { IConfigurationService } from '../../configuration/common/configurationService';
 import { FileChunk, FileChunkAndScore, FileChunkWithEmbedding, FileChunkWithOptionalEmbedding } from '../../chunking/common/chunk';
 import { ComputeBatchInfo, EmbeddingsComputeQos, IChunkingEndpointClient } from '../../chunking/common/chunkingEndpointClient';
 import { distance, Embedding, EmbeddingType, rankEmbeddings } from '../../embeddings/common/embeddingsComputer';
@@ -24,8 +24,11 @@ import { IVSCodeExtensionContext } from '../../extContext/common/extensionContex
 import { logExecTime } from '../../log/common/logExecTime';
 import { ILogService } from '../../log/common/logService';
 import { ISimulationTestContext } from '../../simulationTestContext/common/simulationTestContext';
+import { ISearchService } from '../../search/common/searchService';
 import { ITelemetryService } from '../../telemetry/common/telemetry';
+import { ExcludeSettingOptions } from '../../../vscodeTypes';
 import { WorkspaceChunkSearchOptions } from '../common/workspaceChunkSearch';
+import { BYOK_CHUNKING_AUTH_TOKEN, isByokEmbeddingModelConfigured } from '../common/byokEmbeddingModel';
 import { BuildIndexTriggerReason } from './codeSearch/codeSearchRepo';
 import { createWorkspaceChunkAndEmbeddingCache, IWorkspaceChunkAndEmbeddingCache } from './workspaceChunkAndEmbeddingCache';
 import { FileRepresentation, IWorkspaceFileIndex } from './workspaceFileIndex';
@@ -41,45 +44,45 @@ export interface WorkspaceChunkEmbeddingsIndexState {
  */
 const maxParallelEmbeddingOps = 50;
 
+/** Max files to lexically pre-filter before computing BYOK document embeddings. */
+const byokMaxCandidateFiles = 80;
+
+/**
+ * BYOK embedding backends (e.g. CPU vLLM) cannot absorb Copilot's default indexing parallelism.
+ * Keep search-path concurrency low to avoid 503 overload and long upstream queues.
+ */
+const byokMaxParallelEmbeddingOps = 2;
+
+/** Max text-search matches collected per lexical query term. */
+const byokMaxTextSearchMatchesPerTerm = 150;
+
 export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
-	private readonly _cache: Lazy<Promise<IWorkspaceChunkAndEmbeddingCache>>;
+	private _cachePromise: Promise<IWorkspaceChunkAndEmbeddingCache> | undefined;
 
 	private readonly _onDidChangeWorkspaceIndexState = this._register(new Emitter<void>());
 	public readonly onDidChangeWorkspaceIndexState = Event.debounce(this._onDidChangeWorkspaceIndexState.event, () => { }, 2500, undefined, undefined, undefined, this._store);
 
 	private readonly _cacheRoot: URI | undefined;
 
-	private readonly _onDisposeCts = this._register(new CancellationTokenSource());
-
 	private _isDisposed = false;
 
 	constructor(
 		private readonly _embeddingType: EmbeddingType,
 		@IVSCodeExtensionContext vsExtensionContext: IVSCodeExtensionContext,
-		@IInstantiationService instantiationService: IInstantiationService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@IAuthenticationService private readonly _authService: IAuthenticationService,
+		@IConfigurationService private readonly _configurationService: IConfigurationService,
 		@ILogService private readonly _logService: ILogService,
 		@ISimulationTestContext private readonly _simulationTestContext: ISimulationTestContext,
 		@ITelemetryService private readonly _telemetryService: ITelemetryService,
 		@IWorkspaceFileIndex private readonly _workspaceIndex: IWorkspaceFileIndex,
 		@IChunkingEndpointClient private readonly _chunkingEndpointClient: IChunkingEndpointClient,
+		@ISearchService private readonly _searchService: ISearchService,
 	) {
 		super();
 
 		this._cacheRoot = vsExtensionContext.storageUri;
-
-		this._cache = new Lazy(async () => {
-			const cache = this._register(await instantiationService.invokeFunction(accessor => createWorkspaceChunkAndEmbeddingCache(accessor, this._embeddingType, this._cacheRoot, this._workspaceIndex, this._onDisposeCts.token)));
-
-			// Make sure we dispose the cache if the index is disposed while the cache is still initializing
-			if (this._isDisposed) {
-				cache.dispose();
-			}
-
-			this._onDidChangeWorkspaceIndexState.fire();
-			return cache;
-		});
 
 		this._register(Event.any(
 			this._workspaceIndex.onDidChangeFiles,
@@ -92,16 +95,50 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
 	override dispose(): void {
 		this._isDisposed = true;
-		this._onDisposeCts.cancel();
+		this._cachePromise = undefined;
 		super.dispose();
 	}
 
+	private async getCache(token: CancellationToken): Promise<IWorkspaceChunkAndEmbeddingCache> {
+		if (this._isDisposed) {
+			throw new CancellationError();
+		}
+
+		if (!this._cachePromise) {
+			this._cachePromise = this.initCache().catch(e => {
+				this._cachePromise = undefined;
+				throw e;
+			});
+		}
+
+		return raceCancellationError(this._cachePromise, token);
+	}
+
+	private async initCache(): Promise<IWorkspaceChunkAndEmbeddingCache> {
+		const cache = await this._instantiationService.invokeFunction(accessor =>
+			createWorkspaceChunkAndEmbeddingCache(
+				accessor,
+				this._embeddingType,
+				this._cacheRoot,
+				this._workspaceIndex,
+				CancellationToken.None,
+			));
+
+		if (this._isDisposed) {
+			cache.dispose();
+			throw new CancellationError();
+		}
+
+		this._onDidChangeWorkspaceIndexState.fire();
+		return this._register(cache);
+	}
+
 	async getIndexState(): Promise<WorkspaceChunkEmbeddingsIndexState | undefined> {
-		if (!this._cache.hasValue) {
+		if (!this._cachePromise) {
 			return undefined;
 		}
 
-		const cache = await this._cache.value;
+		const cache = await this._cachePromise;
 		const allWorkspaceFiles = Array.from(this._workspaceIndex.values());
 
 		let indexedCount = 0;
@@ -127,7 +164,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			return false;
 		}
 
-		const cache = await this._cache.value;
+		const cache = await this.getCache(CancellationToken.None);
 		return cache.isIndexed(fileRep);
 	}
 
@@ -171,7 +208,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 			return;
 		}
 
-		const authToken = (await this._authService.getGitHubSession('any', { silent: true }))?.accessToken;
+		const authToken = await this.tryGetAuthToken();
 		if (authToken) {
 			await this.getChunksAndEmbeddings(authToken, file, new ComputeBatchInfo(), EmbeddingsComputeQos.Batch, telemetryInfo.callTracker.add('WorkspaceChunkEmbeddingsIndex::triggerIndexingOfFile'), token);
 		}
@@ -208,6 +245,126 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 				workspaceSearchCorrelationId: telemetryInfo.correlationId,
 			}, { execTime });
 		});
+	}
+
+	/**
+	 * BYOK semantic search: lexically narrow to candidate files, then embed and rank only those files.
+	 * Avoids indexing the entire workspace on every query (required for large repos without GitHub code search).
+	 */
+	async searchByokWorkspace(
+		queryText: string,
+		query: Promise<Embedding>,
+		maxResults: number,
+		options: WorkspaceChunkSearchOptions,
+		telemetryInfo: TelemetryCorrelationId,
+		token: CancellationToken,
+	): Promise<FileChunkAndScore[]> {
+		return logExecTime(this._logService, 'WorkspaceChunkEmbeddingIndex.searchByokWorkspace', async () => {
+			await raceCancellationError(this._workspaceIndex.initialize(), token);
+
+			const candidateFiles = await raceCancellationError(
+				this.findByokCandidateFiles(queryText, options, token),
+				token,
+			);
+			this._logService.info(
+				`WorkspaceChunkEmbeddingsIndex: BYOK search found ${candidateFiles.length} candidate file(s) for query`,
+			);
+
+			if (candidateFiles.length === 0) {
+				return [];
+			}
+
+			const [queryEmbedding, fileChunksAndEmbeddings] = await raceCancellationError(Promise.all([
+				query,
+				this.getEmbeddingsForFiles(
+					candidateFiles,
+					options.globPatterns ?? {},
+					EmbeddingsComputeQos.Batch,
+					{ info: telemetryInfo.addCaller('WorkspaceChunkEmbeddingsIndex::searchByokWorkspace') },
+					token,
+					byokMaxParallelEmbeddingOps,
+				),
+			]), token);
+
+			if (fileChunksAndEmbeddings.length === 0) {
+				this._logService.warn(
+					`WorkspaceChunkEmbeddingsIndex: BYOK search produced no embeddings for ${candidateFiles.length} candidate file(s)`,
+				);
+			}
+
+			return this.rankEmbeddings(queryEmbedding, fileChunksAndEmbeddings, maxResults);
+		}, (execTime, status) => {
+			this._telemetryService.sendMSFTTelemetryEvent('workspaceChunkEmbeddingsIndex.perf.searchByokWorkspace', {
+				status,
+				workspaceSearchSource: telemetryInfo.callTracker.toString(),
+				workspaceSearchCorrelationId: telemetryInfo.correlationId,
+			}, { execTime });
+		});
+	}
+
+	private async findByokCandidateFiles(
+		queryText: string,
+		options: WorkspaceChunkSearchOptions,
+		token: CancellationToken,
+	): Promise<URI[]> {
+		const candidateFiles = new ResourceMap<void>();
+		const searchTerms = this.getByokLexicalSearchTerms(queryText);
+
+		for (const term of searchTerms) {
+			if (candidateFiles.size >= byokMaxCandidateFiles || token.isCancellationRequested) {
+				break;
+			}
+			await this.collectByokTextSearchMatches(term, options, candidateFiles, token);
+		}
+
+		return Array.from(candidateFiles.keys());
+	}
+
+	private getByokLexicalSearchTerms(queryText: string): string[] {
+		const trimmed = queryText.trim();
+		const terms = new Set<string>();
+		if (trimmed.length > 0) {
+			terms.add(trimmed);
+		}
+
+		for (const word of trimmed.split(/\s+/)) {
+			const normalized = word.replace(/[^\p{L}\p{N}_-]/gu, '').toLowerCase();
+			if (normalized.length >= 3) {
+				terms.add(normalized);
+			}
+		}
+
+		return Array.from(terms);
+	}
+
+	private async collectByokTextSearchMatches(
+		pattern: string,
+		options: WorkspaceChunkSearchOptions,
+		candidateFiles: ResourceMap<void>,
+		token: CancellationToken,
+	): Promise<void> {
+		const searchResult = this._searchService.findTextInFiles2(
+			{ pattern, isRegExp: false },
+			{
+				include: options.globPatterns?.include,
+				exclude: options.globPatterns?.exclude,
+				maxResults: byokMaxTextSearchMatchesPerTerm,
+				useExcludeSettings: ExcludeSettingOptions.SearchAndFilesExclude,
+				caseInsensitive: true,
+			},
+			token,
+		);
+
+		for await (const item of searchResult.results) {
+			if (token.isCancellationRequested || candidateFiles.size >= byokMaxCandidateFiles) {
+				break;
+			}
+			if (item.uri && shouldInclude(item.uri, options.globPatterns ?? {})) {
+				candidateFiles.set(item.uri);
+			}
+		}
+
+		await raceCancellationError(searchResult.complete, token);
 	}
 
 	async searchSubsetOfFiles(
@@ -351,12 +508,10 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
 		// Telemetry event name kept as 'getAllWorkspaceEmbeddings' for dashboard backward compatibility
 		return logExecTime(this._logService, 'WorkspaceChunkEmbeddingIndex.indexAllWorkspaceFiles', async () => {
-			const authToken = trigger === 'auto'
-				? (await this._authService.getGitHubSession('any', { silent: true }))?.accessToken
-				: (await this._authService.getGitHubSession('any', { createIfNone: { detail: l10n.t('Sign in to GitHub to index workspace files.') } }))?.accessToken;
-			if (!authToken) {
-				throw new Error('Unable to get auth token');
-			}
+		const authToken = await this.tryGetAuthToken(trigger !== 'auto');
+		if (!authToken) {
+			throw new Error('Unable to get auth token');
+		}
 
 			const limiter = new Limiter(maxParallelEmbeddingOps);
 			await raceCancellationError(Promise.all(allWorkspaceFiles.map(file => {
@@ -401,7 +556,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 
 		// Read back from DB cache with bounded concurrency.
 		// This avoids keeping all chunk data in memory during indexing.
-		const cache = await this._cache.value;
+		const cache = await this.getCache(token);
 		const allFiles = Array.from(this._workspaceIndex.values());
 		const limiter = new Limiter<readonly FileChunkWithEmbedding[] | undefined>(maxParallelEmbeddingOps);
 		const perFileChunks = await raceCancellationError(Promise.all(allFiles.map(file => {
@@ -418,7 +573,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		return coalesce(perFileChunks).flat();
 	}
 
-	private async getEmbeddingsForFiles(files: readonly URI[], include: GlobIncludeOptions, qos: EmbeddingsComputeQos, telemetry: { info: TelemetryCorrelationId; batchInfo?: ComputeBatchInfo }, token: CancellationToken): Promise<FileChunkWithEmbedding[]> {
+	private async getEmbeddingsForFiles(files: readonly URI[], include: GlobIncludeOptions, qos: EmbeddingsComputeQos, telemetry: { info: TelemetryCorrelationId; batchInfo?: ComputeBatchInfo }, token: CancellationToken, maxParallel = maxParallelEmbeddingOps): Promise<FileChunkWithEmbedding[]> {
 		const batchInfo = telemetry.batchInfo ?? new ComputeBatchInfo();
 
 		return logExecTime(this._logService, 'workspaceChunkEmbeddingsIndex.getEmbeddingsForFiles', async () => {
@@ -428,7 +583,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 				throw new Error('Unable to get auth token');
 			}
 
-			const limiter = new Limiter<readonly FileChunkWithEmbedding[] | undefined>(maxParallelEmbeddingOps);
+			const limiter = new Limiter<readonly FileChunkWithEmbedding[] | undefined>(maxParallel);
 			const chunksAndEmbeddings = await raceCancellationError(Promise.all(files.map(uri => {
 				return limiter.queue(async () => {
 					if (token.isCancellationRequested) {
@@ -478,7 +633,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 	 * Get the chunks and embeddings for a file.
 	*/
 	private async getChunksAndEmbeddings(authToken: string, file: FileRepresentation, batchInfo: ComputeBatchInfo, qos: EmbeddingsComputeQos, telemetryInfo: CallTracker, token: CancellationToken): Promise<readonly FileChunkWithEmbedding[] | undefined> {
-		const cache = await raceCancellationError(this._cache.value, token);
+		const cache = await this.getCache(token);
 		const existing = await raceCancellationError(cache.get(file), token);
 		if (existing) {
 			return existing;
@@ -496,7 +651,7 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 	 * Get the chunks for a file as well as the embeddings if we have them already
 	 */
 	private async getChunksWithOptionalEmbeddings(authToken: string, file: FileRepresentation, batchInfo: ComputeBatchInfo, qos: EmbeddingsComputeQos, telemetryInfo: CallTracker, token: CancellationToken): Promise<readonly FileChunkWithOptionalEmbedding[] | undefined> {
-		const cache = await raceCancellationError(this._cache.value, token);
+		const cache = await this.getCache(token);
 		const existing = await raceCancellationError(cache.get(file), token);
 		if (existing) {
 			return existing;
@@ -506,7 +661,15 @@ export class WorkspaceChunkEmbeddingsIndex extends Disposable {
 		return this._chunkingEndpointClient.computeChunks(authToken, this._embeddingType, file, batchInfo, qos, cachedChunks, telemetryInfo, token);
 	}
 
-	private async tryGetAuthToken(): Promise<string | undefined> {
-		return (await this._authService.getGitHubSession('any', { createIfNone: { detail: l10n.t('Sign in to GitHub to index workspace files.') } }))?.accessToken;
+	private async tryGetAuthToken(interactive = false): Promise<string | undefined> {
+		if (isByokEmbeddingModelConfigured(this._configurationService)) {
+			return BYOK_CHUNKING_AUTH_TOKEN;
+		}
+
+		if (interactive) {
+			return (await this._authService.getGitHubSession('any', { createIfNone: { detail: l10n.t('Sign in to GitHub to index workspace files.') } }))?.accessToken;
+		}
+
+		return (await this._authService.getGitHubSession('any', { silent: true }))?.accessToken;
 	}
 }

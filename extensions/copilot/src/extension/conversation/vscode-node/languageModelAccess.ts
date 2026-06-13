@@ -287,7 +287,7 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 	}
 
 	private async _provideLanguageModelChatInfo(options: { silent: boolean }, token: vscode.CancellationToken): Promise<vscode.LanguageModelChatInformation[]> {
-		const session = await this._getToken();
+		const session = await this._getToken({ silent: true });
 		if (!session) {
 			// Return cached models until we have auth reacquired
 			// We clear this list in onDidAuthenticationChange so signed out should still have model picker clear
@@ -531,59 +531,47 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		return this._lmWrapper.provideTokenCount(endpoint, text);
 	}
 
+	private _getNonCopilotEmbeddingModelOverride(): string | undefined {
+		const embeddingModelOverride = this._configurationService.getNonExtensionConfig<string>('chat.embeddingModel');
+		if (embeddingModelOverride
+			&& typeof embeddingModelOverride === 'string'
+			&& embeddingModelOverride.length > 0
+			&& !embeddingModelOverride.startsWith('copilot.')) {
+			return embeddingModelOverride;
+		}
+		return undefined;
+	}
+
 	private async _registerEmbeddings(): Promise<void> {
 
 		const dispo = this._register(new MutableDisposable());
 
 
 		const update = async () => {
-			// Check if the user has selected a non-Copilot embedding model.
-			// When they have, we register a delegate provider that forwards
-			// to vscode.lm.computeEmbeddings — no Copilot token required.
-			const embeddingModelOverride = this._configurationService.getNonExtensionConfig<string>('chat.embeddingModel');
-			const hasUserSelectedModel = embeddingModelOverride
-				&& typeof embeddingModelOverride === 'string'
-				&& embeddingModelOverride.length > 0
-				&& !embeddingModelOverride.startsWith('copilot.');
-
-			if (hasUserSelectedModel) {
-				// Verify the model is still registered. If the provider extension
-				// was disabled or uninstalled, fall back to the default path.
+			// When the user selected a non-Copilot embedding model, an extension
+			// (e.g. DIAL) registers the provider. Copilot must not re-register
+			// the same model ID — that throws and briefly clears the provider
+			// during BYOK extension refresh. Internal flows delegate via
+			// vscode.lm.computeEmbeddings / ExtensionContributedEmbeddingEndpoint.
+			const embeddingModelOverride = this._getNonCopilotEmbeddingModelOverride();
+			if (embeddingModelOverride) {
+				dispo.clear();
 				try {
 					const registeredModels = vscode.lm.embeddingModels;
 					if (!registeredModels.includes(embeddingModelOverride)) {
-						this._logService.warn(
-							`[LanguageModelAccess] Embedding model '${embeddingModelOverride}' is no longer registered; falling back to default.`,
+						this._logService.trace(
+							`[LanguageModelAccess] Waiting for embedding model '${embeddingModelOverride}' to be registered by its provider extension.`,
 						);
-						vscode.window.showWarningMessage(
-							localize('embeddingModel.noLongerRegistered', "The embedding model '{0}' is no longer available. Falling back to the default model.", embeddingModelOverride),
-						);
-						// Fall through to the default path below.
-					} else {
-						dispo.clear();
-						dispo.value = vscode.lm.registerEmbeddingsProvider(embeddingModelOverride, new class implements vscode.EmbeddingsProvider {
-							async provideEmbeddings(input: string[], token: vscode.CancellationToken): Promise<vscode.Embedding[]> {
-								return vscode.lm.computeEmbeddings(embeddingModelOverride, input, token);
-							}
-						});
-						return;
 					}
 				} catch {
-					// embeddingModels is a proposed API; if it throws, proceed
-					// with registration and let computeEmbeddings fail if unavailable.
-					dispo.clear();
-					dispo.value = vscode.lm.registerEmbeddingsProvider(embeddingModelOverride, new class implements vscode.EmbeddingsProvider {
-						async provideEmbeddings(input: string[], token: vscode.CancellationToken): Promise<vscode.Embedding[]> {
-							return vscode.lm.computeEmbeddings(embeddingModelOverride, input, token);
-						}
-					});
-					return;
+					// embeddingModels is a proposed API; ignore lookup failures.
 				}
+				return;
 			}
 
 			// No override — fall back to the default Copilot embedding model,
 			// which requires a valid Copilot token.
-			if (!await this._getToken()) {
+			if (!await this._getToken({ forDefaultEmbeddings: true })) {
 				dispo.clear();
 				return;
 			}
@@ -615,9 +603,12 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 		await update();
 	}
 
-	private async _getToken(): Promise<CopilotToken | undefined> {
+	private async _getToken(options?: { forDefaultEmbeddings?: boolean; silent?: boolean }): Promise<CopilotToken | undefined> {
 		if (!this._authenticationService.hasCopilotTokenSource) {
-			this._logService.warn('[LanguageModelAccess] LanguageModel/Embeddings are not available without a Copilot token source');
+			const usingByokEmbeddings = !!this._getNonCopilotEmbeddingModelOverride();
+			if (!options?.silent && (!usingByokEmbeddings || options?.forDefaultEmbeddings)) {
+				this._logService.warn('[LanguageModelAccess] LanguageModel/Embeddings are not available without a Copilot token source');
+			}
 			return undefined;
 		}
 
@@ -625,8 +616,11 @@ export class LanguageModelAccess extends Disposable implements IExtensionContrib
 			const copilotToken = await this._authenticationService.getCopilotToken();
 			return copilotToken;
 		} catch (e) {
-			this._logService.warn('[LanguageModelAccess] LanguageModel/Embeddings are not available without auth token');
-			this._logService.error(e);
+			const usingByokEmbeddings = !!this._getNonCopilotEmbeddingModelOverride();
+			if (!options?.silent && (!usingByokEmbeddings || options?.forDefaultEmbeddings)) {
+				this._logService.warn('[LanguageModelAccess] LanguageModel/Embeddings are not available without auth token');
+				this._logService.error(e);
+			}
 			return undefined;
 		}
 	}

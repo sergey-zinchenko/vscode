@@ -210,8 +210,8 @@ export class RemoteEmbeddingsComputer implements IEmbeddingsComputer {
 				const vectors = await endpoint.computeEmbeddings(Array.from(batch), cancellationToken);
 				embeddingsOut.push(...vectors.map(value => ({ type, value })));
 			} catch (err) {
-				this._logService.warn(
-					`[RemoteEmbeddingsComputer] Extension-contributed embedding request failed: ${err}`,
+				this._logService.error(
+					`[RemoteEmbeddingsComputer] Extension-contributed embedding request failed (${inputs.length} inputs, model ${endpoint.name}): ${err}`,
 				);
 				return { type, values: [] };
 			}
