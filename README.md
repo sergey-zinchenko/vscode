@@ -14,6 +14,7 @@ See [FORK.md](FORK.md) for a full list of customizations vs upstream `main`.
 | Topic | Document |
 | --- | --- |
 | Fork customizations | [FORK.md](FORK.md) |
+| **Production installer (Windows, unsigned)** | [build/custom/PRODUCTION-BUILD.md](build/custom/PRODUCTION-BUILD.md) |
 | DIAL setup (auth, settings, commands) | [extensions/dial-chat-model-provider/README.md](extensions/dial-chat-model-provider/README.md) |
 | DIAL extension architecture | [extensions/dial-chat-model-provider/ARCHITECTURE.md](extensions/dial-chat-model-provider/ARCHITECTURE.md) |
 | Contributing to this fork | [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -36,6 +37,12 @@ Build only the DIAL extension:
 npm run compile-dial
 npm run watch-dial       # watch mode
 ```
+
+### Production installer (Windows x64)
+
+Unsigned installer with optimized size (~200 MB, no shipped source maps). Requires `npm run compile-dial` and `$env:CI='true'` during packaging.
+
+See [build/custom/PRODUCTION-BUILD.md](build/custom/PRODUCTION-BUILD.md) for the full step-by-step guide and verification checklist.
 
 ## Issues and feedback
 

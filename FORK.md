@@ -48,6 +48,8 @@ npm run compile-dial
 npm run watch-dial
 ```
 
+Required before production packaging — see [build/custom/PRODUCTION-BUILD.md](build/custom/PRODUCTION-BUILD.md).
+
 **License:** Apache 2.0 — see [`extensions/dial-chat-model-provider/LICENSE`](extensions/dial-chat-model-provider/LICENSE) and [`NOTICE`](extensions/dial-chat-model-provider/NOTICE).
 
 ---
@@ -126,7 +128,27 @@ When pulling changes from [microsoft/vscode](https://github.com/microsoft/vscode
 
 ---
 
-## 5. Licenses
+## 6. Production installer
+
+Build an unsigned Windows x64 installer with DIAL and BYOK from this fork:
+
+| Document | Purpose |
+| --- | --- |
+| [build/custom/PRODUCTION-BUILD.md](build/custom/PRODUCTION-BUILD.md) | Full guide: prerequisites, CI map stripping, gulp sequence, verification |
+| [.github/instructions/production-build.instructions.md](.github/instructions/production-build.instructions.md) | Agent quick reference |
+
+**Fork-specific notes vs upstream Microsoft docs:**
+
+- DIAL is bundled from `extensions/dial-chat-model-provider/` — run `npm run compile-dial` before packaging (no VSIX in `build/custom/`).
+- Set `CI=true` when running `vscode-win32-x64-min-ci` to exclude `.js.map` files from the installer.
+- Keep `@github/copilot/sdk/index.js` out of `build/.moduleignore`.
+- `patchWin32DependenciesTask` skips non-Windows `.node` binaries from Copilot SDK vendor trees.
+
+Output: `.build/win32-x64/user-setup/VSCodeSetup.exe`
+
+---
+
+## 7. Licenses
 
 | Component | License |
 | --- | --- |
