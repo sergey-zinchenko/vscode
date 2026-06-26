@@ -46,7 +46,7 @@ See [build/custom/PRODUCTION-BUILD.md](build/custom/PRODUCTION-BUILD.md) for the
 
 ## Issues and feedback
 
-Open issues and pull requests on [sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode), not on microsoft/vscode.
+Open issues and pull requests on [sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode) or its parent fork — **not** on microsoft/vscode. Push to `origin`; resolve the PR base from git remotes (see [.github/instructions/pull-requests.instructions.md](.github/instructions/pull-requests.instructions.md)).
 
 - DIAL extension bugs → mention `extensions/dial-chat-model-provider/`
 - BYOK / chat pipeline bugs → mention `src/vs/workbench/contrib/chat/` or `extensions/copilot/`

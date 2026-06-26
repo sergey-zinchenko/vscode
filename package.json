@@ -279,10 +279,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/microsoft/vscode.git"
+    "url": "https://github.com/sergey-zinchenko/vscode.git"
   },
   "bugs": {
-    "url": "https://github.com/microsoft/vscode/issues"
+    "url": "https://github.com/sergey-zinchenko/vscode/issues"
   },
   "optionalDependencies": {
     "windows-foreground-love": "0.6.1"

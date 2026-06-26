@@ -6,7 +6,7 @@ This document describes how [sergey-zinchenko/vscode](https://github.com/sergey-
 
 | Branch | Role |
 | --- | --- |
-| `main` | Tracks upstream Microsoft VS Code (Code - OSS) |
+| `main` | Tracks upstream Microsoft VS Code (Code - OSS); **PR target for fork work** |
 | `feat/forward-reasoning` | Active feature work: BYOK model pipeline + DIAL provider integration |
 | `feat/forward-reasoning-lm-provider` | Related LM provider work |
 | `feat/317187-lm-usage` | Language model usage reporting |
@@ -19,6 +19,23 @@ git log main..HEAD --oneline
 ```
 
 **Current delta vs `main` (committed on `feat/forward-reasoning`):** 55 files changed, ~3,081 insertions, ~195 deletions.
+
+### Pull requests
+
+Integration fork: [sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode). Upstream sync: [microsoft/vscode](https://github.com/microsoft/vscode) — **never** a PR target for fork work.
+
+This fork may have **forks of its own**. Workflow depends on remotes:
+
+| You push to | PR opens in | Head |
+| --- | --- | --- |
+| `origin` = `sergey-zinchenko/vscode` | `sergey-zinchenko/vscode` | branch name |
+| `origin` = your fork, `upstream` = `sergey-zinchenko/vscode` | `sergey-zinchenko/vscode` | `your-user:branch` |
+| `origin` = your fork, `upstream` = another fork (not microsoft) | that `upstream` repo | `your-user:branch` |
+| `origin` = your fork, no `upstream` | `sergey-zinchenko/vscode` (default) | `your-user:branch` |
+
+See [.github/instructions/pull-requests.instructions.md](.github/instructions/pull-requests.instructions.md) for the full resolution algorithm and `gh` examples.
+
+Contributors: add `upstream` → `sergey-zinchenko/vscode` when cloning your own fork.
 
 ---
 

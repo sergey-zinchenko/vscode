@@ -1,0 +1,19 @@
+---
+description: Resolve PR target from git remotes; never microsoft/vscode; support forks of the integration fork
+alwaysApply: true
+---
+
+# Pull requests (fork workflow)
+
+- **Never** open PRs in `microsoft/vscode` for fork work
+- **Push** to `origin` (your write remote — may be `your-user/vscode`)
+- **Resolve PR base** before `gh pr create` or GitHub MCP:
+  1. Parse `git remote get-url origin` and `upstream` (if any)
+  2. If `upstream` exists and is **not** `microsoft/vscode` → `--repo` = upstream owner/repo
+  3. Else if `origin` is `sergey-zinchenko/vscode` → `--repo sergey-zinchenko/vscode`
+  4. Else → `--repo sergey-zinchenko/vscode`, `--head your-user:branch`
+  5. Base branch: `main` unless user specifies otherwise
+- **Head**: same repo as base → branch name; cross-fork → `{origin-owner}:{branch}`
+- Verify PR URL is **not** `github.com/microsoft/vscode/pull/...`
+
+Full guide: [.github/instructions/pull-requests.instructions.md](../../.github/instructions/pull-requests.instructions.md)
