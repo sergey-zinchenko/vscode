@@ -405,14 +405,17 @@ export function convertToApiChatMessage(messages: Raw.ChatMessage[]): Array<vsco
 				apiContent.push(new vscode.LanguageModelTextPart(contentPart.text));
 			} else if (contentPart.type === Raw.ChatCompletionContentPartKind.Image) {
 				// Handle base64 encoded images
-				if (contentPart.imageUrl.url.startsWith('data:')) {
-					const dataUrlRegex = /^data:([^;]+);base64,([A-Za-z0-9+/=_-]+)$/;
-					const match = contentPart.imageUrl.url.match(dataUrlRegex);
-
-					if (match) {
-						const [, mimeType, base64Data] = match;
-						const encoding = /[-_]/.test(base64Data) ? 'base64url' : 'base64';
-						apiContent.push(new vscode.LanguageModelDataPart(Buffer.from(base64Data, encoding), mimeType as ChatImageMimeType));
+				const url = contentPart.imageUrl.url;
+				if (url.startsWith('data:')) {
+					const base64Prefix = ';base64,';
+					const prefixIndex = url.indexOf(base64Prefix);
+					if (prefixIndex !== -1) {
+						const mimeType = url.slice('data:'.length, prefixIndex);
+						const base64Data = url.slice(prefixIndex + base64Prefix.length);
+						if (mimeType && base64Data) {
+							const encoding = base64Data.includes('-') || base64Data.includes('_') ? 'base64url' : 'base64';
+							apiContent.push(new vscode.LanguageModelDataPart(Buffer.from(base64Data, encoding), mimeType as ChatImageMimeType));
+						}
 					}
 				} else {
 					// Not a base64 image
