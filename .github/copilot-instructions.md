@@ -153,16 +153,18 @@ function f(x: number, y: string): void { }
 
 ## Fork: pull requests
 
-When creating or updating pull requests for this workspace:
+When creating or updating pull requests:
 
-- **Repo:** `sergey-zinchenko/vscode` — **never** `microsoft/vscode`
-- **Base branch:** `main`
-- **Remote:** push to `origin` (the fork), not `upstream`
-- **`gh`:** always `--repo sergey-zinchenko/vscode --base main`
-- **GitHub MCP / API:** `owner=sergey-zinchenko`, `repo=vscode`, `base=main`
-- Verify the PR URL contains `github.com/sergey-zinchenko/vscode/pull/`
+- **Never** target `microsoft/vscode` for fork work.
+- **Push** always to `origin` (may be a personal fork).
+- **Resolve PR base** from remotes — see [pull-requests.instructions.md](instructions/pull-requests.instructions.md):
+  - `upstream` (if not microsoft) → PR into upstream
+  - else `origin` = `sergey-zinchenko/vscode` → PR there
+  - else personal fork without upstream → PR into `sergey-zinchenko/vscode`, head `your-user:branch`
+- Nested forks: PR into the non-microsoft parent from `upstream`, head `your-user:branch`.
+- Verify the PR URL matches the resolved base repo.
 
-See [AGENTS.md](../AGENTS.md) and [FORK.md](../FORK.md).
+See also [AGENTS.md](../AGENTS.md) and [FORK.md](../FORK.md).
 
 ## Fork: production installer (Windows x64)
 

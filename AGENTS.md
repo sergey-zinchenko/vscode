@@ -11,18 +11,28 @@ For detailed project overview, architecture, coding guidelines, and validation s
 
 ## Pull requests (fork only)
 
-**Never open pull requests in [microsoft/vscode](https://github.com/microsoft/vscode).** All PRs for this workspace go to **[sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode)** with base branch **`main`**.
+**Never open pull requests in [microsoft/vscode](https://github.com/microsoft/vscode).**
 
-Before creating a PR, confirm `git remote get-url origin` points at `sergey-zinchenko/vscode`. Do not use an `upstream` remote as the PR target even if the branch tracks it.
+This repo is an integration fork; others may fork it again. Before creating a PR:
 
-When using `gh`:
+1. **Push** to `origin` (your write remote — may be `your-user/vscode`, not only `sergey-zinchenko/vscode`).
+2. **Resolve the PR base repo** from git remotes — do not hardcode your login:
+   - If `upstream` exists and is **not** `microsoft/vscode` → open the PR in **`upstream`**.
+   - Else if `origin` is `sergey-zinchenko/vscode` → open the PR there.
+   - Else (personal fork, no `upstream`) → open the PR in **`sergey-zinchenko/vscode`** with head `your-user:branch`.
+3. Use base branch **`main`** unless the user says otherwise.
+4. Verify the PR URL is **not** `github.com/microsoft/vscode/pull/...`.
+
+Full algorithm, tables, and examples: [.github/instructions/pull-requests.instructions.md](.github/instructions/pull-requests.instructions.md).
 
 ```bash
 git push -u origin HEAD
-gh pr create --repo sergey-zinchenko/vscode --base main --title "..." --body "..."
+# Same repo as origin → --head <branch>
+# Cross-fork → --head <origin-owner>:<branch>
+gh pr create --repo <pr-base-owner>/vscode --base main --head <head> --title "..." --body "..."
 ```
 
-When using GitHub MCP or the GitHub API, pass **`owner=sergey-zinchenko`**, **`repo=vscode`**, **`base=main`**. After creation, verify the PR URL contains `github.com/sergey-zinchenko/vscode/pull/`.
+GitHub MCP / API: set `owner` and `repo` from the resolved **PR base**, not from `package.json` alone.
 
 ## Production installer (fork)
 
