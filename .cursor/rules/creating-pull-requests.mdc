@@ -1,0 +1,20 @@
+---
+description: Create pull requests only in the fork sergey-zinchenko/vscode, never in microsoft/vscode
+alwaysApply: true
+---
+
+# Pull requests (this fork)
+
+- **Target repo:** `sergey-zinchenko/vscode`, base branch **`main`**
+- **Never** open PRs in `microsoft/vscode` from this workspace
+- Push to **`origin`** (must be `sergey-zinchenko/vscode`), not `upstream`
+- Always pass an explicit repo when using `gh` or GitHub MCP/API
+
+```bash
+git push -u origin HEAD
+gh pr create --repo sergey-zinchenko/vscode --base main --title "..." --body "..."
+```
+
+After creation, verify the URL is `https://github.com/sergey-zinchenko/vscode/pull/...`.
+
+See [AGENTS.md](../../AGENTS.md) and [FORK.md](../../FORK.md).

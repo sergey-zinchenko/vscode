@@ -9,11 +9,15 @@ description: Create a draft pull request for the current session. Use when the u
 
 # Create Draft Pull Request
 
-Use the GitHub MCP server to create a draft pull request — do NOT use the `gh` CLI.
+**Target repo:** `sergey-zinchenko/vscode` (base: `main`). **Never** create a PR in `microsoft/vscode`.
 
 1. Run the compile and hygiene tasks (fixing any errors)
 2. If there are any uncommitted changes, use the `/commit` skill to commit them
 3. Review all changes in the current session
-4. Write a clear, concise PR title with a short area prefix (e.g. "sessions: …", "editor: …")
-5. Write a description covering what changed, why, and anything reviewers should know
-6. Create the draft pull request
+4. Push the branch to `origin` (must be `sergey-zinchenko/vscode`, not `upstream`)
+5. Write a clear, concise PR title with a short area prefix (e.g. "sessions: …", "editor: …")
+6. Write a description covering what changed, why, and anything reviewers should know
+7. Create the draft pull request with an explicit repo:
+   - **GitHub MCP:** `owner=sergey-zinchenko`, `repo=vscode`, `base=main`, `draft=true`
+   - **`gh` CLI:** `gh pr create --repo sergey-zinchenko/vscode --base main --draft ...`
+8. Verify the returned URL is `https://github.com/sergey-zinchenko/vscode/pull/...`

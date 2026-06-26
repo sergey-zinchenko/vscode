@@ -9,6 +9,21 @@ This file provides instructions for AI coding agents working with the VS Code co
 
 For detailed project overview, architecture, coding guidelines, and validation steps, see the [Copilot Instructions](.github/copilot-instructions.md).
 
+## Pull requests (fork only)
+
+**Never open pull requests in [microsoft/vscode](https://github.com/microsoft/vscode).** All PRs for this workspace go to **[sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode)** with base branch **`main`**.
+
+Before creating a PR, confirm `git remote get-url origin` points at `sergey-zinchenko/vscode`. Do not use an `upstream` remote as the PR target even if the branch tracks it.
+
+When using `gh`:
+
+```bash
+git push -u origin HEAD
+gh pr create --repo sergey-zinchenko/vscode --base main --title "..." --body "..."
+```
+
+When using GitHub MCP or the GitHub API, pass **`owner=sergey-zinchenko`**, **`repo=vscode`**, **`base=main`**. After creation, verify the PR URL contains `github.com/sergey-zinchenko/vscode/pull/`.
+
 ## Production installer (fork)
 
 To build an unsigned, size-optimized Windows x64 installer with DIAL + BYOK:

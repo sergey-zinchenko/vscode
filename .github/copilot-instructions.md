@@ -151,6 +151,19 @@ function f(x: number, y: string): void { }
 - Avoid using events to drive control flow between components. Instead, prefer direct method calls or service interactions to ensure clearer dependencies and easier traceability of logic. Events should be reserved for broadcasting state changes or notifications rather than orchestrating behavior across components.
 - Service dependencies MUST be declared in constructors and MUST NOT be accessed through the `IInstantiationService` at any other point in time.
 
+## Fork: pull requests
+
+When creating or updating pull requests for this workspace:
+
+- **Repo:** `sergey-zinchenko/vscode` — **never** `microsoft/vscode`
+- **Base branch:** `main`
+- **Remote:** push to `origin` (the fork), not `upstream`
+- **`gh`:** always `--repo sergey-zinchenko/vscode --base main`
+- **GitHub MCP / API:** `owner=sergey-zinchenko`, `repo=vscode`, `base=main`
+- Verify the PR URL contains `github.com/sergey-zinchenko/vscode/pull/`
+
+See [AGENTS.md](../AGENTS.md) and [FORK.md](../FORK.md).
+
 ## Fork: production installer (Windows x64)
 
 When asked to build a prod installer or `VSCodeSetup.exe` for this fork:

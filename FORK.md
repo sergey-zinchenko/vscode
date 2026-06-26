@@ -6,7 +6,7 @@ This document describes how [sergey-zinchenko/vscode](https://github.com/sergey-
 
 | Branch | Role |
 | --- | --- |
-| `main` | Tracks upstream Microsoft VS Code (Code - OSS) |
+| `main` | Tracks upstream Microsoft VS Code (Code - OSS); **PR target for fork work** |
 | `feat/forward-reasoning` | Active feature work: BYOK model pipeline + DIAL provider integration |
 | `feat/forward-reasoning-lm-provider` | Related LM provider work |
 | `feat/317187-lm-usage` | Language model usage reporting |
@@ -19,6 +19,13 @@ git log main..HEAD --oneline
 ```
 
 **Current delta vs `main` (committed on `feat/forward-reasoning`):** 55 files changed, ~3,081 insertions, ~195 deletions.
+
+### Pull requests
+
+- **Target:** [sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode), base branch **`main`**
+- **Never** open PRs in [microsoft/vscode](https://github.com/microsoft/vscode) from this workspace
+- Push to **`origin`** (`sergey-zinchenko/vscode`), not `upstream`, before creating a PR
+- Agents and automation must pass `--repo sergey-zinchenko/vscode` (or equivalent API/MCP owner/repo)
 
 ---
 

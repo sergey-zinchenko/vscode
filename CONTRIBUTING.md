@@ -71,7 +71,19 @@ Please include the following with each issue:
 
 ### Creating Pull Requests
 
-* Please refer to the article on [creating pull requests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests) and contributing to this project.
+Open pull requests **only** in [sergey-zinchenko/vscode](https://github.com/sergey-zinchenko/vscode) against **`main`**. Do **not** open PRs in [microsoft/vscode](https://github.com/microsoft/vscode) from this fork.
+
+1. Create a feature branch from `main`.
+2. Push to `origin` (your fork: `https://github.com/sergey-zinchenko/vscode.git`).
+3. Open a PR on GitHub or with the CLI:
+
+   ```bash
+   gh pr create --repo sergey-zinchenko/vscode --base main
+   ```
+
+4. Confirm the PR URL starts with `https://github.com/sergey-zinchenko/vscode/pull/`.
+
+For general build and dev setup, see [README.md](README.md). Upstream [How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute) applies only to environment setup, not where to send PRs from this fork.
 
 ### Final Checklist
 
