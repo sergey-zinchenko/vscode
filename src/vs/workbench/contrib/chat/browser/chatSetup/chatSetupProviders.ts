@@ -33,6 +33,7 @@ import { IChatRequestToolEntry } from '../../common/attachments/chatVariableEntr
 import { ChatAgentLocation, ChatConfiguration, ChatModeKind } from '../../common/constants.js';
 import { ILanguageModelsService } from '../../common/languageModels.js';
 import { CHAT_OPEN_ACTION_ID, CHAT_SETUP_ACTION_ID } from '../actions/chatActions.js';
+import { ensureCopilotEnabledForByokFromAccessor } from '../enableCopilotForByokContribution.js';
 import { ChatViewId, IChatWidgetService } from '../chat.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
 import { ChatViewPane } from '../widgetHosts/viewPane/chatViewPane.js';
@@ -331,6 +332,10 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			refreshTokens(this.commandService);
 		}
 
+		if (this.chatEntitlementService.hasByokModels) {
+			await this.instantiationService.invokeFunction(accessor => ensureCopilotEnabledForByokFromAccessor(accessor));
+		}
+
 		const widget = chatWidgetService.getWidgetBySessionResource(requestModel.session.sessionResource);
 		const modeInfo = widget?.input.currentModeInfo;
 
@@ -626,15 +631,27 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private whenAgentReady(chatAgentService: IChatAgentService, mode: ChatModeKind | undefined): Promise<unknown> | void {
-		const defaultAgent = chatAgentService.getDefaultAgent(this.location, mode);
-		if (defaultAgent && !defaultAgent.isCore) {
+		const isNonCoreDefaultAgentReady = () => {
+			const defaultAgent = chatAgentService.getDefaultAgent(this.location, mode);
+			return Boolean(defaultAgent && !defaultAgent.isCore);
+		};
+
+		if (isNonCoreDefaultAgentReady()) {
 			return; // we have a default agent from an extension!
 		}
 
-		return Event.toPromise(Event.filter(chatAgentService.onDidChangeAgents, () => {
-			const defaultAgent = chatAgentService.getDefaultAgent(this.location, mode);
-			return Boolean(defaultAgent && !defaultAgent.isCore);
-		}));
+		return this.whenAgentReadyAsync(chatAgentService, mode, isNonCoreDefaultAgentReady);
+	}
+
+	private async whenAgentReadyAsync(chatAgentService: IChatAgentService, mode: ChatModeKind | undefined, isNonCoreDefaultAgentReady: () => boolean): Promise<void> {
+		if (this.chatEntitlementService.hasByokModels) {
+			await this.instantiationService.invokeFunction(accessor => ensureCopilotEnabledForByokFromAccessor(accessor));
+			if (isNonCoreDefaultAgentReady()) {
+				return;
+			}
+		}
+
+		await Event.toPromise(Event.filter(chatAgentService.onDidChangeAgents, () => isNonCoreDefaultAgentReady()));
 	}
 
 	private async whenAgentActivated(chatService: IChatService): Promise<void> {
