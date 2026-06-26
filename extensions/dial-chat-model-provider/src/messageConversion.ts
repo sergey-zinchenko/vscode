@@ -297,6 +297,26 @@ function flattenToolResult(content: ToolResultContent): string {
 		.join('');
 }
 
+export function messagesContainUserImageAttachments(
+	messages: readonly vscode.LanguageModelChatRequestMessage[],
+): boolean {
+	for (const msg of messages) {
+		if (msg.role !== vscode.LanguageModelChatMessageRole.User) {
+			continue;
+		}
+		for (const part of msg.content) {
+			if (
+				isLanguageModelDataPartShape(part) &&
+				isImageMime(part.mimeType) &&
+				!isCopilotCustomDataPart(part.mimeType)
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 /**
  * Flatten VS Code chat messages into DIAL-compatible messages, including tool calls/results
  * and `custom_content.attachments` with base64 `data` for inline images.

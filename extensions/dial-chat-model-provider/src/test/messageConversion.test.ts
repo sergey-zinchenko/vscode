@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { normalizeDeployment } from '../deploymentMetadata';
-import { aggregateMessagesForLog, toDialMessages } from '../messageConversion';
+import { aggregateMessagesForLog, messagesContainUserImageAttachments, toDialMessages } from '../messageConversion';
 import { type JsonValue } from '../runtimeGuards';
 
 function dep(extras: Record<string, unknown> = {}) {
@@ -154,5 +154,23 @@ suite('messageConversion — log aggregation', () => {
 		assert.strictEqual(stats.toolCallCount, 0);
 		assert.strictEqual(stats.attachmentCount, 0);
 		assert.strictEqual(stats.attachmentTypes, undefined);
+	});
+});
+
+suite('messageConversion — messagesContainUserImageAttachments', () => {
+	test('detects user image data parts', () => {
+		assert.strictEqual(
+			messagesContainUserImageAttachments([imagePart('image/png', [1, 2, 3])]),
+			true,
+		);
+	});
+
+	test('ignores cache_control metadata parts', () => {
+		const messages: vscode.LanguageModelChatRequestMessage[] = [{
+			name: 'user',
+			role: vscode.LanguageModelChatMessageRole.User,
+			content: [{ mimeType: 'cache_control', data: new Uint8Array([1]) } as unknown as vscode.LanguageModelTextPart],
+		}];
+		assert.strictEqual(messagesContainUserImageAttachments(messages), false);
 	});
 });

@@ -293,6 +293,8 @@ export class DialClient {
 					maxIn: d.maxInputTokens,
 					maxOut: d.maxOutputTokens,
 					reasoningEfforts: d.features?.reasoning_efforts,
+					inputAttachmentTypes: d.inputAttachmentTypes,
+					maxInputAttachments: d.maxInputAttachments,
 				})),
 			),
 		);
