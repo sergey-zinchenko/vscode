@@ -10,10 +10,12 @@ import {
 	summarizeModelPipeline,
 	topicsEqual,
 } from './deploymentFilter';
+import { deploymentSupportsImageInput } from './attachmentCapabilities';
 import { dialLog } from './logger';
 import { summarizeAccessToken, summarizeAccessTokenClaims } from './jwtUtils';
 import {
 	flattenRequestMessageText,
+	messagesContainUserImageAttachments,
 	toDialMessages,
 	toOpenAITools,
 	toToolChoice,
@@ -180,6 +182,26 @@ export class DialModelService implements vscode.Disposable {
 			} catch (e: unknown) {
 				const detail = e instanceof Error ? e.message : String(e);
 				dialLog.warn(`Could not fetch deployment metadata for ${deploymentId}: ${detail}`);
+			}
+		} else if (
+			messagesContainUserImageAttachments(messages) &&
+			!deploymentSupportsImageInput(deployment)
+		) {
+			// `/openai/models` listing can omit attachment fields; refresh from GET deployment.
+			try {
+				const fresh = await client.getDeployment(deploymentId);
+				if (deploymentSupportsImageInput(fresh)) {
+					deployment = fresh;
+					this.mergeChatDeployment(fresh);
+					dialLog.info(
+						`Refreshed deployment metadata for ${deploymentId} (input attachment types from GET)`,
+					);
+				}
+			} catch (e: unknown) {
+				const detail = e instanceof Error ? e.message : String(e);
+				dialLog.warn(
+					`Could not refresh deployment metadata for ${deploymentId}: ${detail}`,
+				);
 			}
 		}
 
@@ -504,6 +526,15 @@ export class DialModelService implements vscode.Disposable {
 		}
 		if (Date.now() - this.lastFetchCompletedAt >= PICKER_STALE_MS) {
 			void this.fetchModels();
+		}
+	}
+
+	private mergeChatDeployment(fresh: DialDeployment): void {
+		const replace = (list: readonly DialDeployment[]): readonly DialDeployment[] =>
+			list.map((m) => (m.id === fresh.id ? fresh : m));
+		this._chatModels = replace(this._chatModels);
+		if (this._sourceModels.length > 0) {
+			this._sourceModels = replace(this._sourceModels);
 		}
 	}
 

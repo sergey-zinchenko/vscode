@@ -50,8 +50,10 @@ export class HistoricalImage extends PromptElement<HistoricalImageProps, unknown
 	}
 
 	override async render(_state: unknown, sizing: PromptSizing) {
-		// If the model doesn't support vision, omit historical images
-		if (!this.promptEndpoint.supportsVision || !this.authService.copilotToken?.isEditorPreviewFeaturesEnabled()) {
+		// If the model doesn't support vision, omit historical images.
+		// When there is no Copilot token (BYOK / no GitHub login), treat preview features as enabled.
+		const previewEnabled = this.authService.copilotToken?.isEditorPreviewFeaturesEnabled() ?? true;
+		if (!this.promptEndpoint.supportsVision || !previewEnabled) {
 			return undefined;
 		}
 
@@ -78,7 +80,8 @@ export class Image extends PromptElement<ImageProps, unknown> {
 		const fillerUri: Uri = this.props.reference ?? Uri.parse('Attached Image');
 
 		try {
-			if (!this.promptEndpoint.supportsVision || !this.authService.copilotToken?.isEditorPreviewFeaturesEnabled()) {
+			const previewEnabled = this.authService.copilotToken?.isEditorPreviewFeaturesEnabled() ?? true;
+			if (!this.promptEndpoint.supportsVision || !previewEnabled) {
 				if (this.props.omitReferences) {
 					return;
 				}

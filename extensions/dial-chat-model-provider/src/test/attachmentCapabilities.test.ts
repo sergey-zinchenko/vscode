@@ -42,6 +42,13 @@ suite('attachmentCapabilities — deploymentSupportsImageInput', () => {
 		);
 	});
 
+	test('inputAttachmentTypes (camelCase listing) with image/png → true', () => {
+		assert.strictEqual(
+			deploymentSupportsImageInput(dep({ inputAttachmentTypes: ['image/png'] })),
+			true,
+		);
+	});
+
 	test('url_attachments_supported without MIME list → true (legacy)', () => {
 		assert.strictEqual(
 			deploymentSupportsImageInput(dep({ features: { url_attachments_supported: true } })),

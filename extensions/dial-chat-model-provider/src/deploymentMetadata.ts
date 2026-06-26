@@ -107,7 +107,10 @@ function normalizeDefaults(raw: Nullable<JsonValue>): Nullable<JsonObject> {
 }
 
 function normalizeInputAttachmentTypes(raw: JsonObject): readonly string[] | undefined {
-	const types = readStringArray(raw, 'input_attachment_types');
+	// Listing may use snake_case; static config / some endpoints use camelCase (see limits).
+	const fromSnake = readStringArray(raw, 'input_attachment_types');
+	const fromCamel = readStringArray(raw, 'inputAttachmentTypes');
+	const types = fromSnake.length > 0 ? fromSnake : fromCamel;
 	return types.length > 0 ? types : undefined;
 }
 
@@ -227,7 +230,8 @@ export function normalizeDeployment(
 	const description = readNonEmptyString(raw, 'description');
 	const model = readNonEmptyString(raw, 'model');
 	const inputAttachmentTypes = normalizeInputAttachmentTypes(raw);
-	const maxInputAttachments = readNumber(raw, 'max_input_attachments');
+	const maxInputAttachments =
+		readNumber(raw, 'max_input_attachments') ?? readNumber(raw, 'maxInputAttachments');
 	const topics = normalizeTopics(raw);
 
 	return {
